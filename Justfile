@@ -14,6 +14,16 @@ build:
     if [ ! -d "{{llama_dir}}" ]; then
         echo "Cloning michaelneale/llama.cpp (rpc-local-gguf branch)..."
         git clone -b rpc-local-gguf https://github.com/michaelneale/llama.cpp.git "{{llama_dir}}"
+    else
+        cd "{{llama_dir}}"
+        current_branch=$(git branch --show-current)
+        if [ "$current_branch" != "rpc-local-gguf" ]; then
+            echo "⚠️  llama.cpp is on branch '$current_branch', switching to rpc-local-gguf..."
+            git checkout rpc-local-gguf
+        fi
+        echo "Pulling latest rpc-local-gguf from origin..."
+        git pull --ff-only origin rpc-local-gguf
+        cd ..
     fi
     cmake -B "{{build_dir}}" -S "{{llama_dir}}" -DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF
     cmake --build "{{build_dir}}" --config Release -j$(sysctl -n hw.ncpu)
