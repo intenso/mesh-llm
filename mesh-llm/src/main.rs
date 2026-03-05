@@ -1749,6 +1749,7 @@ async fn check_for_update() {
     if let Some(latest) = latest_release_version().await {
         if version_newer(&latest, VERSION) {
             eprintln!("💡 Update available: v{VERSION} → v{latest}  https://github.com/michaelneale/decentralized-inference/releases");
+            eprintln!("   curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-llm-aarch64-apple-darwin.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/");
         }
     }
 }
