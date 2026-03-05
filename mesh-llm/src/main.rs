@@ -1398,9 +1398,11 @@ async fn bootstrap_proxy(
 }
 
 fn first_available_target(targets: &election::ModelTargets) -> election::InferenceTarget {
-    for target in targets.targets.values() {
-        if !matches!(target, election::InferenceTarget::None) {
-            return target.clone();
+    for hosts in targets.targets.values() {
+        for target in hosts {
+            if !matches!(target, election::InferenceTarget::None) {
+                return target.clone();
+            }
         }
     }
     election::InferenceTarget::None

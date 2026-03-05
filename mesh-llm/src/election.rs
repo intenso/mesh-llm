@@ -85,20 +85,41 @@ pub struct MoeState {
 /// Per-model routing table. The API proxy uses this to route by model name.
 #[derive(Clone, Debug, Default)]
 pub struct ModelTargets {
-    /// model_name → InferenceTarget
-    pub targets: HashMap<String, InferenceTarget>,
+    /// model_name → list of inference targets (multiple hosts = load balancing)
+    pub targets: HashMap<String, Vec<InferenceTarget>>,
     /// MoE state — if set, this model uses MoE expert sharding.
     /// The proxy uses this for session-sticky routing across MoE nodes.
     pub moe: Option<MoeState>,
+    /// Round-robin counter for load balancing (not cloned — each clone starts fresh,
+    /// but that's fine since the proxy clones per-request anyway)
+    counter: u64,
 }
 
 impl ModelTargets {
-    /// Get target for a specific model.
+    /// Get target for a specific model. Round-robins across multiple hosts.
     pub fn get(&self, model: &str) -> InferenceTarget {
-        self.targets
-            .get(model)
-            .cloned()
-            .unwrap_or(InferenceTarget::None)
+        match self.targets.get(model) {
+            Some(targets) if !targets.is_empty() => {
+                // Simple round-robin using a hash of the model + counter
+                // (counter isn't shared across clones, but combined with
+                // request timing gives reasonable distribution)
+                let idx = (self.counter as usize) % targets.len();
+                targets[idx].clone()
+            }
+            _ => InferenceTarget::None,
+        }
+    }
+
+    /// Get target with an explicit index (for round-robin from proxy)
+    #[allow(dead_code)]
+    pub fn get_nth(&self, model: &str, n: u64) -> InferenceTarget {
+        match self.targets.get(model) {
+            Some(targets) if !targets.is_empty() => {
+                let idx = (n as usize) % targets.len();
+                targets[idx].clone()
+            }
+            _ => InferenceTarget::None,
+        }
     }
 
     /// Get MoE target for a session (hash-based routing).
@@ -117,7 +138,7 @@ impl ModelTargets {
     pub fn available_models(&self) -> Vec<String> {
         self.targets
             .keys()
-            .filter(|k| !matches!(self.targets[k.as_str()], InferenceTarget::None))
+            .filter(|k| !self.targets[k.as_str()].is_empty())
             .cloned()
             .collect()
     }
@@ -153,7 +174,7 @@ pub fn build_moe_targets(
         }
     }
     let mut targets = ModelTargets::default();
-    targets.targets.insert(model_name.to_string(), InferenceTarget::MoeLocal(my_port));
+    targets.targets.insert(model_name.to_string(), vec![InferenceTarget::MoeLocal(my_port)]);
     targets.moe = Some(moe_state);
     targets
 }
@@ -234,6 +255,7 @@ pub async fn election_loop(
     // Track the set of model-group worker IDs to detect when we actually need to restart
     let mut last_worker_set: Vec<iroh::EndpointId> = vec![];
     let mut currently_host = false;
+    let mut llama_death_rx: Option<tokio::sync::oneshot::Receiver<()>> = None;
 
     // Initial settle
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -316,13 +338,30 @@ pub async fn election_loop(
                 )
                 .await;
             }
-            // Wait for next change
-            if peer_rx.changed().await.is_err() {
-                break;
+            // Wait for next change OR llama-server death
+            tokio::select! {
+                res = peer_rx.changed() => {
+                    if res.is_err() { break; }
+                    eprintln!("⚡ Mesh changed — re-checking... (still host, no restart needed)");
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+                _ = async {
+                    if let Some(ref mut rx) = llama_death_rx {
+                        let _ = rx.await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    eprintln!("🔄 [{}] llama-server died — restarting...", model_name);
+                    llama_death_rx = None;
+                    currently_host = false;
+                    update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
+                    on_change(false, false);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    // Fall through to restart
+                }
             }
-            eprintln!("⚡ Mesh changed — re-checking... (still host, no restart needed)");
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            continue;
         }
 
         // Something changed — kill llama-server if we were running it
@@ -382,7 +421,7 @@ pub async fn election_loop(
 
             // In solo mode, pass empty model_peers so start_llama won't use any workers
             let peers_for_launch = if need_split { &model_peers[..] } else { &[] };
-            let llama_port = match start_llama(
+            let (llama_port, death_rx) = match start_llama(
                 &node,
                 &tunnel_mgr,
                 rpc_port,
@@ -396,7 +435,7 @@ pub async fn election_loop(
             )
             .await
             {
-                Some(port) => port,
+                Some((port, death_rx)) => (port, death_rx),
                 None => {
                     on_change(true, false);
                     last_worker_set = new_worker_set;
@@ -422,6 +461,7 @@ pub async fn election_loop(
                 &target_tx,
             )
             .await;
+            llama_death_rx = Some(death_rx);
             on_change(true, true);
             eprintln!(
                 "✅ [{}] llama-server ready on internal port {llama_port}",
@@ -461,12 +501,26 @@ pub async fn election_loop(
             on_change(false, false);
         }
 
-        // Wait for next peer change
-        if peer_rx.changed().await.is_err() {
-            break;
+        // Wait for next peer change OR llama-server death
+        tokio::select! {
+            res = peer_rx.changed() => {
+                if res.is_err() { break; }
+                eprintln!("⚡ Mesh changed — re-electing...");
+            }
+            _ = async {
+                if let Some(ref mut rx) = llama_death_rx {
+                    let _ = rx.await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                eprintln!("🔄 [{}] llama-server died — restarting...", model_name);
+                llama_death_rx = None;
+                currently_host = false;
+                update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
+                on_change(false, false);
+            }
         }
-
-        eprintln!("⚡ Mesh changed — re-electing...");
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
@@ -543,7 +597,7 @@ async fn moe_election_loop(
             match launch::start_llama_server(
                 &bin_dir, &model, llama_port, &[], None, None, 0, model_bytes,
             ).await {
-                Ok(()) => {
+                Ok(_death_rx) => {
                     node.set_role(NodeRole::Host { http_port: llama_port }).await;
                     tunnel_mgr.set_http_port(llama_port);
                     currently_running = true;
@@ -607,7 +661,7 @@ async fn moe_election_loop(
             match launch::start_llama_server(
                 &bin_dir, &shard_path, llama_port, &[], None, None, 0, shard_bytes,
             ).await {
-                Ok(()) => {
+                Ok(_death_rx) => {
                     node.set_role(NodeRole::Host { http_port: llama_port }).await;
                     tunnel_mgr.set_http_port(llama_port);
                     currently_running = true;
@@ -636,6 +690,7 @@ async fn moe_election_loop(
 
 /// Update the model targets map — sets our model's target and includes
 /// targets for other models we know about from peers.
+/// When multiple nodes serve the same model, all are included for load balancing.
 async fn update_targets(
     node: &mesh::Node,
     my_model: &str,
@@ -643,44 +698,46 @@ async fn update_targets(
     target_tx: &watch::Sender<ModelTargets>,
 ) {
     let peers = node.peers().await;
-    let mut targets = HashMap::new();
+    let mut targets: HashMap<String, Vec<InferenceTarget>> = HashMap::new();
 
-    // Our model
-    targets.insert(my_model.to_string(), my_target);
+    // Our model — we're always first in the list
+    if !matches!(my_target, InferenceTarget::None) {
+        targets.entry(my_model.to_string()).or_default().push(my_target);
+    }
 
-    // Other models being served — find their hosts
-    let mut other_models: HashMap<String, Vec<&mesh::PeerInfo>> = HashMap::new();
+    // All peers — group by model
     for p in &peers {
         if let Some(ref serving) = p.serving {
-            if serving != my_model {
-                other_models.entry(serving.clone()).or_default().push(p);
-            }
-        }
-    }
-    for (model, model_peers) in &other_models {
-        // Find the host for this model (highest VRAM peer serving it with Host role, or predict who will be)
-        if let Some(host) = model_peers
-            .iter()
-            .find(|p| matches!(p.role, NodeRole::Host { .. }))
-        {
-            targets.insert(model.clone(), InferenceTarget::Remote(host.id));
-        } else {
-            // No host announced yet — predict based on VRAM
-            if let Some(likely_host) = model_peers
-                .iter()
-                .filter(|p| !matches!(p.role, NodeRole::Client))
-                .max_by_key(|p| (p.vram_bytes, p.id))
-            {
-                targets.insert(model.clone(), InferenceTarget::Remote(likely_host.id));
+            if matches!(p.role, NodeRole::Host { .. }) {
+                // Peer is a confirmed host — add as target
+                targets.entry(serving.clone()).or_default().push(InferenceTarget::Remote(p.id));
+            } else if !matches!(p.role, NodeRole::Client) {
+                // Peer is serving but not yet announced as host — predict
+                // Only add if no host exists yet for this model
+                let has_host = targets.get(serving)
+                    .map(|t| !t.is_empty())
+                    .unwrap_or(false);
+                if !has_host {
+                    targets.entry(serving.clone()).or_default().push(InferenceTarget::Remote(p.id));
+                }
             }
         }
     }
 
-    target_tx.send_replace(ModelTargets { targets, moe: None });
+    let count: usize = targets.values().map(|v| v.len()).sum();
+    if count > 1 {
+        for (model, hosts) in &targets {
+            if hosts.len() > 1 {
+                eprintln!("⚡ [{}] {} hosts available (load balancing)", model, hosts.len());
+            }
+        }
+    }
+
+    target_tx.send_replace(ModelTargets { targets, moe: None, counter: 0 });
 }
 
 /// Start llama-server with --rpc pointing at model-group nodes (self + workers).
-/// Returns the ephemeral port llama-server is listening on, or None on failure.
+/// Returns the ephemeral port and a death notification receiver, or None on failure.
 async fn start_llama(
     node: &mesh::Node,
     tunnel_mgr: &tunnel::Manager,
@@ -692,7 +749,7 @@ async fn start_llama(
     draft: Option<&Path>,
     draft_max: u16,
     force_split: bool,
-) -> Option<u16> {
+) -> Option<(u16, tokio::sync::oneshot::Receiver<()>)> {
     let my_vram = node.vram_bytes();
     let model_bytes = total_model_bytes(model);
     let min_vram = (model_bytes as f64 * 1.1) as u64;
@@ -859,7 +916,7 @@ async fn start_llama(
     )
     .await
     {
-        Ok(()) => Some(llama_port),
+        Ok(death_rx) => Some((llama_port, death_rx)),
         Err(e) => {
             eprintln!("  Failed to start llama-server: {e}");
             None

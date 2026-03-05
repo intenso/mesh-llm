@@ -115,6 +115,7 @@ pub async fn kill_llama_server() {
 ///   - < 5GB: FP16 (default) — small models, KV cache is tiny
 ///   - 5-50GB: Q8_0 — no measurable quality loss, saves ~50% KV memory
 ///   - > 50GB: Q4_0 — slight long-context degradation, but these models need every byte
+/// Start llama-server. Returns a oneshot receiver that fires when the process exits.
 pub async fn start_llama_server(
     bin_dir: &Path,
     model: &Path,
@@ -124,7 +125,7 @@ pub async fn start_llama_server(
     draft: Option<&Path>,
     draft_max: u16,
     model_bytes: u64,
-) -> Result<()> {
+) -> Result<tokio::sync::oneshot::Receiver<()>> {
     let llama_server = bin_dir.join("llama-server");
     anyhow::ensure!(
         llama_server.exists(),
@@ -236,10 +237,13 @@ pub async fn start_llama_server(
             tracing::info!("Still waiting for llama-server to load model... ({i}s, {transferred} transferred)");
         }
         if reqwest_health_check(&url).await {
+            let (death_tx, death_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 let _ = child.wait().await;
+                eprintln!("⚠️  llama-server process exited unexpectedly");
+                let _ = death_tx.send(());
             });
-            return Ok(());
+            return Ok(death_rx);
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
