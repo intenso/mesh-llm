@@ -2,7 +2,7 @@
 
 Distribute MoE models across mesh nodes using **masked expert groups** with bounded network fanout (≤1 remote host per token per MoE layer, ideally 0). Each node holds the full trunk (attention + norms + router + embeddings + head) plus only its assigned expert shard. Sessions are pinned to nodes so decode runs entirely local.
 
-See [MoE.md](MoE.md) for full design discussion. See [ROADMAP.md](ROADMAP.md) for how this fits into mesh-llm.
+See [ROADMAP.md](ROADMAP.md) for how this fits into mesh-llm.
 
 ## Architecture Summary
 

@@ -35,6 +35,10 @@ See [MoE_PLAN.md](../MoE_PLAN.md) for full plan. Distribute MoE experts across m
 - [ ] **Phase 4: optimized rankings**: run `moe-analyze` lazily for unknown MoE models, cache rankings. Current fallback uses conservative 50% shared core with sequential experts.
 - [ ] **Phase 5: scale testing**: Mixtral 8×22B (~80GB), Qwen3-235B-A22B (~130GB) — models that actually need distribution.
 
+## Resilience
+- [x] **Nostr re-discovery on peer loss**: `--auto` nodes re-discover via Nostr when all peers are lost for 90s. Handles publisher restarts with new identity. Works for both GPU nodes and `--client` nodes.
+- [ ] **Demand-based model upgrade**: If a large-VRAM host is serving a small model but demand exists for a bigger model nobody is serving, promote to the bigger model. Prevents 100GB nodes sitting on Qwen2.5-3B while GLM-4.7-Flash has unserved demand.
+
 ## Nice to Have
 - [ ] Don't download what won't fit: check VRAM before downloading via `--model`
 - [x] Request rates in `/api/status` JSON for external tooling (demand map: `request_count`, `last_active_secs_ago` per model)
