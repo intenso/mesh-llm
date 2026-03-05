@@ -1278,26 +1278,6 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
         },
     };
 
-    // MoE probe cache: session_hint → node index.
-    // Cleared when election publishes new targets (mesh change).
-    let probe_cache: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, usize>>>
-        = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-
-    // Background task: watch for target changes and clear the probe cache
-    {
-        let cache = probe_cache.clone();
-        let mut rx = target_rx.clone();
-        tokio::spawn(async move {
-            while rx.changed().await.is_ok() {
-                let mut c = cache.lock().await;
-                if !c.is_empty() {
-                    eprintln!("🎯 MoE probe cache cleared (mesh changed, {} sessions evicted)", c.len());
-                    c.clear();
-                }
-            }
-        });
-    }
-
     loop {
         let (tcp_stream, _addr) = match listener.accept().await {
             Ok(r) => r,
@@ -1307,7 +1287,6 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
 
         let targets = target_rx.borrow().clone();
         let node = node.clone();
-        let probe_cache = probe_cache.clone();
 
         let drop_tx = drop_tx.clone();
         tokio::spawn(async move {
@@ -1335,42 +1314,14 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                         node.record_request(name);
                     }
 
-                    // MoE routing: probe-based placement with session-sticky cache
-                    let target = if let Some(ref moe) = targets.moe {
+                    // MoE routing: use session hint for sticky routing across shards
+                    let target = if targets.moe.is_some() {
+                        // Extract a session hint from the request for sticky routing.
+                        // Use the source address + any user/session field as the hint.
                         let session_hint = proxy::extract_session_hint(&buf[..n])
                             .unwrap_or_else(|| format!("{_addr}"));
-
-                        // Check probe cache first
-                        let cached = probe_cache.lock().await.get(&session_hint).copied();
-                        if let Some(idx) = cached {
-                            // Cached probe result — route directly
-                            if idx < moe.nodes.len() {
-                                moe.nodes[idx].clone()
-                            } else {
-                                first_available_target(&targets)
-                            }
-                        } else if moe.nodes.len() > 1 {
-                            // New session with multiple shards — probe to find best
-                            let prompt = proxy::extract_prompt_for_probe(&buf[..n]);
-                            let model = model_name.as_deref().unwrap_or("").to_string();
-                            let winner = if let Some(ref prompt_text) = prompt {
-                                proxy::probe_moe_nodes(&node, &moe.nodes, prompt_text, &model).await
-                            } else {
-                                None
-                            };
-                            if let Some(idx) = winner {
-                                probe_cache.lock().await.insert(session_hint, idx);
-                                moe.nodes[idx].clone()
-                            } else {
-                                // Probe failed — fall back to hash
-                                let hash = session_hint.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-                                let idx = (hash as usize) % moe.nodes.len();
-                                moe.nodes[idx].clone()
-                            }
-                        } else {
-                            // Single shard — no probe needed
-                            moe.nodes.first().cloned().unwrap_or(election::InferenceTarget::None)
-                        }
+                        targets.get_moe_target(&session_hint)
+                            .unwrap_or(first_available_target(&targets))
                     } else if let Some(ref name) = model_name {
                         let t = targets.get(name);
                         if matches!(t, election::InferenceTarget::None) {

@@ -101,18 +101,16 @@ impl ModelTargets {
             .unwrap_or(InferenceTarget::None)
     }
 
-    /// Get MoE target for a session (hash-based fallback).
+    /// Get MoE target for a session (hash-based routing).
     /// Returns None if not in MoE mode.
-    #[allow(dead_code)]
     pub fn get_moe_target(&self, session_hint: &str) -> Option<InferenceTarget> {
         let moe = self.moe.as_ref()?;
         if moe.nodes.is_empty() { return None; }
+        // Simple hash routing: hash the session hint, pick a node
         let hash = session_hint.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
         let idx = (hash as usize) % moe.nodes.len();
         Some(moe.nodes[idx].clone())
     }
-
-
 
     /// List all available model names.
     #[allow(dead_code)]
