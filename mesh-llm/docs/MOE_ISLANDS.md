@@ -1,237 +1,141 @@
-# MoE Islands — Distributed Expert-Centric Inference
+# MoE Islands — Expert Co-Activation Clustering for Distributed Inference
 
-Run very large MoE models across multiple machines without moving tokens between
-machines on every layer. Each island holds a cluster of co-firing experts plus
-enough trunk layers to run decode locally. The token moves once (if at all),
-not per-layer.
+Improve distributed MoE inference by clustering experts that fire together
+into islands and routing sessions to the island that best matches the prompt's
+expert activation pattern. Each island holds the full trunk plus its expert
+cluster. Sessions are pinned to an island after classification.
 
-## Problem
+This builds on the existing MoE sharding (full trunk + expert subset per node)
+with two improvements: smarter expert grouping and smarter session routing.
 
-Current MoE sharding replicates the **full trunk** to every node. This works
-when the trunk is small relative to VRAM (Qwen3-30B-A3B trunk ≈ 1.7GB). It
-breaks for very large models:
+## What Changes vs Current Sharding
 
-| Model | Total (Q4) | Trunk est. | Expert params |
-|-------|-----------|------------|---------------|
-| Qwen3-30B-A3B | 17 GB | ~1.7 GB | ~15 GB |
-| Qwen3-235B-A22B | ~130 GB | ~15 GB | ~115 GB |
-| DeepSeek-V3 (671B) | ~370 GB | ~40 GB | ~330 GB |
+| | Current | Islands |
+|---|---------|---------|
+| **Expert grouping** | Gate mass ranking — hottest experts shared, rest distributed sequentially | Co-activation clustering — experts that fire together go to the same island |
+| **Session routing** | Hash of session hint — deterministic, prompt-unaware | Offline classifier — routes prompt to the island whose expert cluster best matches |
+| **Trunk** | Full trunk per node | Full trunk per node (same) |
+| **Cross-node traffic** | Zero | Zero (same) |
+| **When it matters** | Works well with 2 nodes, 68%+ overlap | Matters at 4+ nodes where overlap decreases and expert specialisation becomes important |
 
-At 235B+, the trunk alone may not fit alongside experts on a consumer machine.
-Pipeline parallelism (splitting by layer across nodes) works but requires a
-network hop per layer per token — brutal over WAN.
+## Why Clustering Matters
 
-## Concept
+Current sharding distributes experts by individual gate mass ranking: the
+hottest experts (by aggregate probability) are shared, the rest are dealt out
+round-robin. This ignores that experts fire **in groups** — a code prompt
+activates a cluster of code-related experts together, not randomly.
 
-**Islands** are self-contained inference units. Each island holds:
-1. A **shared prefix** — the first few trunk layers (small, replicated everywhere)
-2. A **trunk fragment** — the remaining trunk layers needed for decode
-3. An **expert cluster** — a subset of experts that frequently co-fire
-
-```
-Prompt arrives at any island
-    │
-    ▼
-┌─────────────────────┐
-│  Shared prefix       │  (layers 0..P, all islands have this)
-│  Router gates fire   │
-│  → expert activations│
-└─────────┬───────────┘
-          │
-     Which experts fired most?
-     Map to island by expert cluster.
-          │
-    ┌─────┴─────┐
-    │ Am I the   │──── yes ──→ Continue decode locally
-    │ right      │
-    │ island?    │──── no ──→ Transfer KV state to correct island
-    └───────────┘              (one network hop, then decode there)
-```
-
-After the prefix, the router has already fired experts across the prefill
-tokens. The activation pattern reveals which expert cluster the prompt
-naturally uses. That cluster maps to an island. The session is pinned there
-for the remainder of decode.
-
-## Why This Works
-
-MoE routers exhibit **prompt-level expert affinity** — a given prompt
-consistently activates the same cluster of experts across layers and tokens.
-This is already visible in `moe-analyze` data: the first 6 MoE layers
-capture the dominant expert pattern for the whole sequence.
-
-This means:
-- **Early layers are sufficient** to classify which island a prompt belongs to
-- **Expert co-firing is clusterable** — experts don't activate randomly, they
-  form natural groups (code experts, math experts, language experts, etc.)
-- **Once classified, the session stays** — decode tokens continue activating
-  the same expert cluster as the prefill
-
-## Building Blocks in llama.cpp
-
-### Available today
-
-| Feature | API | Notes |
-|---------|-----|-------|
-| Expert mask | `llama_model_set_expert_mask()` | Per-model, masks excluded experts with -∞ on gate logits |
-| Router observation | `cb_eval` on `ffn_moe_probs` | C API callback, fires per MoE layer during decode |
-| KV cache export | `llama_state_seq_get_data()` | Serialize KV state for a sequence |
-| KV cache import | `llama_state_seq_set_data()` | Restore KV state on another context |
-| Expert ranking | `moe-analyze` tool | Offline, per-expert gate mass from sample prompts |
-| Expert sharding | `moe-split` tool | Produces GGUF with full trunk + expert subset |
-
-### Needs building
-
-| Feature | Where | Complexity |
-|---------|-------|------------|
-| Expert co-activation matrix | `moe-analyze` | Medium — extend callback to record per-token expert sets, compute co-firing counts |
-| Expert clustering | offline tool or `moe-analyze` | Medium — cluster co-activation matrix into K islands (spectral clustering, k-means on co-fire vectors) |
-| Trunk splitting in `moe-split` | `moe-split` | Medium — output prefix GGUF + per-island GGUF with trunk fragment + experts |
-| Router stats in llama-server | `server-context.cpp` | Medium — wire `cb_eval`, accumulate expert activation counts, expose via response or `/props` |
-| KV cache transfer in llama-server | server HTTP API | Medium — endpoints to export/import KV state as binary blob |
-| Island routing in mesh-llm | `proxy.rs` / `election.rs` | Moderate — replace hash routing with activation-based island selection |
+With 2 nodes and high overlap (68%+), this doesn't matter — both nodes
+cover most expert combinations. With more nodes and less overlap per node,
+a prompt may need experts scattered across multiple islands. Clustering
+experts by co-activation ensures each island is self-contained for a class
+of prompts.
 
 ## Design
 
 ### Offline: Build Islands
 
-Run once per model (or per model + quantization).
+Run once per model (like `moe-analyze` today).
 
 1. **Collect co-activation data** — extend `moe-analyze` to record, for each
    token, which experts were in top-K. Build a `[n_expert × n_expert]`
    co-firing count matrix.
 
-2. **Cluster experts** — group experts that frequently fire together into K
-   islands (K = number of nodes). Standard clustering on the co-firing matrix.
-   Each expert belongs to exactly one island.
+2. **Cluster experts into K islands** — group experts that frequently fire
+   together. Standard clustering (spectral, k-means on co-fire vectors) on
+   the co-firing matrix. Each expert belongs to exactly one island.
+   K = number of nodes.
 
-3. **Split the model** — extend `moe-split` to produce per-island GGUFs:
-   - **Prefix GGUF**: layers 0..P (shared, loaded on every island)
-   - **Island GGUF**: layers P+1..N + the island's expert cluster
-   - P is chosen so the prefix is small enough to replicate cheaply
-     (e.g., first 2-4 transformer blocks)
+3. **Build a prompt classifier** — from the co-activation data, learn which
+   prompt characteristics (topic, language, structure) map to which island.
+   This can be simple (keyword/embedding based) or use the router's own
+   patterns from the analysis data.
 
-4. **Store island metadata** — which experts belong to which island, cached
-   alongside the split GGUFs.
+4. **Split the model** — use existing `moe-split` with the island-based expert
+   assignments instead of gate-mass-ranked assignments. Each island GGUF
+   contains the full trunk + its expert cluster. Same split format as today.
 
-### Runtime: Route to Island
+### Runtime: Route and Serve
 
-On each inference request:
+1. **Prompt arrives at proxy**
+2. **Proxy classifies prompt** → picks island using offline classifier
+3. **Route to island node** — same QUIC tunnel routing as today
+4. **Island runs full inference** — trunk + its experts, start to finish
+5. **Session pinned to island** for follow-up turns
 
-1. **Prefill runs the prefix** — the prompt is processed through the shared
-   prefix layers. This happens on whichever island received the request.
-   During prefill, `cb_eval` observes `ffn_moe_probs` tensors and accumulates
-   which experts activated across the prompt tokens.
+If the classifier is wrong, the island still works — the router picks the
+best available experts from the island's subset. Same graceful degradation
+as current sharding. Quality is slightly lower than if routed to the
+optimal island, but not broken.
 
-2. **Classify** — after prefill of the prefix layers, count expert activations.
-   Map to island: the island whose expert cluster has the highest total
-   activation mass wins.
+## What This Doesn't Solve
 
-3. **Route (if needed)** — if the current island is the winner, continue
-   decode locally (zero cost). If not, serialize the KV cache via
-   `llama_state_seq_get_data()`, transfer to the winning island, restore via
-   `llama_state_seq_set_data()`, and continue decode there.
+**Models where the trunk doesn't fit on one node.** The trunk (attention
+layers, embeddings, output head) is dense — every token passes through
+every trunk layer. You can't split it across nodes without pipeline
+parallelism (token hops per layer boundary).
 
-4. **Decode** — the winning island runs the remaining trunk layers + its
-   experts for all decode tokens. The session is pinned. No further hops.
+| Model | Trunk est. | Fits on 24GB? | Fits on 48GB? |
+|-------|-----------|---------------|---------------|
+| Qwen3-30B-A3B | ~1.7 GB | ✅ | ✅ |
+| Qwen3-235B-A22B | ~15 GB | ✅ | ✅ |
+| DeepSeek-V3 (671B) | ~40 GB | ❌ | ✅ |
 
-### Practical Simplification
+For DeepSeek-V3 on 24GB nodes, islands alone aren't enough — you'd also need
+tensor splitting (RPC) for the trunk within each island, or pipeline
+parallelism. That's a hybrid approach (island for experts + pipeline/tensor
+split for trunk) which is possible but significantly more complex.
 
-For the first implementation, skip the KV transfer:
-
-- **Round 1**: Use an offline prompt classifier (built from the co-activation
-  clusters) to predict the island at the proxy level. No prefix execution
-  needed. If the classifier is wrong, the island still works — it just hits
-  more masked experts (graceful degradation, not failure).
-
-- **Round 2**: Add prefix execution + activation observation + KV transfer
-  for precise routing.
-
-Round 1 requires zero changes to llama-server. Only mesh-llm needs a
-lightweight classifier and the new island-aware `moe-split` output.
-
-## Mesh-LLM Integration
-
-### Election
-
-`moe_election_loop()` currently assigns shards by node index. For islands:
-- Each node is assigned an island (by index in sorted node IDs, same as today)
-- Each node loads its island GGUF (prefix + trunk fragment + expert cluster)
-- The expert mask is set to allow only the island's experts
-
-### Gossip
-
-No gossip changes needed. Each node announces its `serving` model name
-(same for all islands — they all serve the same model). The proxy knows
-which node is which island from the target map.
-
-### Proxy Routing
-
-Replace hash-based session routing with island selection:
-- **Round 1**: Prompt classifier picks island → route to that node
-- **Round 2**: Prefix execution picks island → route (with KV transfer if
-  wrong initial node)
-
-Sticky sessions still apply — once classified, the session stays on its island.
+For Qwen3-235B on 24GB+ nodes, islands work as described.
 
 ## VRAM Budget Example
 
-**DeepSeek-V3 (671B, Q4_K_M ≈ 370GB) across 8 × 24GB nodes:**
+**Qwen3-235B-A22B (Q4_K_M ≈ 130GB) across 4 × 48GB nodes:**
 
 | Component | Per-island | Notes |
 |-----------|-----------|-------|
-| Shared prefix (layers 0-3) | ~2 GB | Replicated |
-| Trunk fragment (layers 4-61) | ~5 GB | 1/8 of remaining trunk (shared attention is small) |
-| Expert cluster (32 of 256) | ~13 GB | 1/8 of expert params |
-| KV cache | ~3 GB | Per-island, independent |
-| **Total** | **~23 GB** | Fits in 24GB |
+| Full trunk | ~15 GB | Replicated |
+| Expert cluster (32 of 128) | ~29 GB | 1/4 of expert params |
+| KV cache (Q8_0) | ~3 GB | Per-island, independent |
+| **Total** | **~47 GB** | Fits in 48GB |
 
-Compare pipeline parallelism: same VRAM per node, but every token crosses the
-network 7 times (once per pipeline stage boundary).
+**DeepSeek-V3 (Q4_K_M ≈ 370GB) across 8 × 64GB nodes:**
 
-Compare current MoE sharding: needs full trunk (~40GB) on every node — doesn't
-fit on 24GB.
+| Component | Per-island | Notes |
+|-----------|-----------|-------|
+| Full trunk | ~40 GB | Replicated |
+| Expert cluster (32 of 256) | ~16 GB | 1/8 of expert params (some shared) |
+| KV cache (Q4_0) | ~4 GB | Per-island, independent |
+| **Total** | **~60 GB** | Fits in 64GB |
 
-## Assumptions and Risks
-
-- **Expert affinity is real and clusterable**: Supported by existing MoE
-  literature and our moe-analyze data. If a model's routing is essentially
-  random (uniform expert usage), islands degrade to random assignment — still
-  works, just no quality benefit from routing.
-
-- **Prefix is enough to classify**: moe-analyze shows first 6 MoE layers
-  capture dominant expert patterns. If the model's routing changes dramatically
-  in deeper layers, prefix classification is misleading. Mitigated by using
-  more prefix layers (at the cost of a larger replicated prefix).
-
-- **Trunk can be split**: This requires `moe-split` to understand layer
-  structure and produce partial-trunk GGUFs that llama.cpp can load and
-  run. Need to verify that llama.cpp can load a model with only layers P+1..N
-  and resume from a KV state produced by layers 0..P.
-
-- **KV cache transfer latency**: For a 4K context with Q8_0 KV on a large
-  model, the KV state is roughly 100-500MB. Over gigabit LAN, 0.5-4 seconds.
-  Over WAN, potentially costly. This is why the offline classifier (Round 1)
-  is the pragmatic first step — avoid the transfer entirely.
-
-## Phases
+## Implementation
 
 ### Phase 1: Co-activation analysis
 Extend `moe-analyze` to output expert co-firing matrix. Add clustering to
-produce island assignments for K nodes.
+produce island assignments for K nodes. Output format: same as existing
+ranking CSV but grouped by island.
 
-### Phase 2: Island-aware splitting
-Extend `moe-split` to produce prefix + island GGUFs (trunk fragment + expert
-cluster per island).
+### Phase 2: Classifier
+Build offline prompt → island classifier from the co-activation data.
+Simplest version: embed the prompt, compare to island centroids from
+the analysis data.
 
-### Phase 3: Offline classifier routing
-Build a lightweight prompt → island classifier from the co-activation clusters.
-Wire into `proxy.rs` for island selection. No llama-server changes.
+### Phase 3: Wire into mesh-llm
+- `compute_assignments()` accepts island-based groupings instead of
+  (or in addition to) gate-mass rankings
+- Proxy uses classifier for routing instead of session hash
+- Everything else (election, gossip, split, launch) stays the same
 
-### Phase 4: Prefix-based routing with KV transfer
-Add `cb_eval` to llama-server for router observation. Add KV export/import
-HTTP endpoints. Wire prefix execution + activation classification + KV
-transfer into the proxy routing path.
+### What Needs Building
+
+| Feature | Where | Complexity |
+|---------|-------|------------|
+| Expert co-activation matrix | `moe-analyze` | Medium |
+| Expert clustering (K islands) | `moe-analyze` or offline script | Medium |
+| Prompt → island classifier | mesh-llm `proxy.rs` | Medium |
+| Island-aware `compute_assignments()` | `moe.rs` | Low — different input, same split logic |
+
+No changes to llama-server, llama.cpp, or the GGUF format.
 
 ## References
 
@@ -239,5 +143,4 @@ transfer into the proxy routing path.
 - Expert ranking data: [MoE_SPLIT_REPORT.md](../MoE_SPLIT_REPORT.md)
 - `moe-analyze` source: `llama.cpp/tools/moe-analyze/moe-analyze.cpp`
 - `moe-split` source: `llama.cpp/tools/moe-split/`
-- KV cache API: `llama_state_seq_get_data()` / `llama_state_seq_set_data()` in `llama.h`
 - Expert mask API: `llama_model_set_expert_mask()` in `llama.h`
