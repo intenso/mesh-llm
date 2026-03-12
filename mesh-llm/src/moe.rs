@@ -245,8 +245,6 @@ pub struct NodeAssignment {
 ///
 /// Returns one NodeAssignment per node. Every expert appears in at least one node.
 /// Convenience wrapper for compute_assignments_with_overlap with overlap=1.
-/// Used by tests and external callers that don't need redundancy.
-#[allow(dead_code)]
 pub fn compute_assignments(
     ranking: &[u32],
     n_nodes: usize,

@@ -308,7 +308,31 @@ pub const MODEL_CATALOG: &[CatalogModel] = &[
         moe: None,
         extra_files: &[],
     },
+    CatalogModel {
+        name: "Qwen3.5-27B-Q4_K_M",
+        file: "Qwen3.5-27B-Q4_K_M.gguf",
+        url: "https://registry.ollama.ai/v2/library/qwen3.5/blobs/sha256:d4b8b4f4c350f5d322dc8235175eeae02d32c6f3fd70bdb9ea481e3abb7d7fc4",
+        size: "17GB",
+        description: "Qwen3.5 27B, latest Qwen dense, strong reasoning and coding",
+        draft: Some("Qwen3-0.6B-Q4_K_M"),
+        moe: None,
+        extra_files: &[],
+    },
     // ── Large (40GB+ VRAM) ────────────────────────────────────────
+    CatalogModel {
+        name: "Qwen3-Coder-Next-Q4_K_M",
+        file: "Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf",
+        url: "https://huggingface.co/Qwen/Qwen3-Coder-Next-GGUF/resolve/main/Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf",
+        size: "48GB",
+        description: "Qwen3 Coder Next ~85B dense, frontier coding model",
+        draft: None,
+        moe: None,
+        extra_files: &[
+            ("Qwen3-Coder-Next-Q4_K_M-00002-of-00004.gguf", "https://huggingface.co/Qwen/Qwen3-Coder-Next-GGUF/resolve/main/Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-00002-of-00004.gguf"),
+            ("Qwen3-Coder-Next-Q4_K_M-00003-of-00004.gguf", "https://huggingface.co/Qwen/Qwen3-Coder-Next-GGUF/resolve/main/Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-00003-of-00004.gguf"),
+            ("Qwen3-Coder-Next-Q4_K_M-00004-of-00004.gguf", "https://huggingface.co/Qwen/Qwen3-Coder-Next-GGUF/resolve/main/Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-00004-of-00004.gguf"),
+        ],
+    },
     CatalogModel {
         name: "Llama-3.3-70B-Instruct-Q4_K_M",
         file: "Llama-3.3-70B-Instruct-Q4_K_M.gguf",

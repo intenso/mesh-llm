@@ -33,6 +33,7 @@ pub fn total_model_bytes(model: &Path) -> u64 {
     std::fs::metadata(model).map(|m| m.len()).unwrap_or(0)
 }
 
+use std::sync::Arc;
 use tokio::sync::watch;
 
 /// Determine if this node should be host for its model group.
@@ -110,18 +111,6 @@ impl ModelTargets {
         }
     }
 
-    /// Get target with an explicit index (for round-robin from proxy)
-    #[allow(dead_code)]
-    pub fn get_nth(&self, model: &str, n: u64) -> InferenceTarget {
-        match self.targets.get(model) {
-            Some(targets) if !targets.is_empty() => {
-                let idx = (n as usize) % targets.len();
-                targets[idx].clone()
-            }
-            _ => InferenceTarget::None,
-        }
-    }
-
     /// Get MoE target for a session (hash-based routing).
     /// Returns None if not in MoE mode.
     pub fn get_moe_target(&self, session_hint: &str) -> Option<InferenceTarget> {
@@ -133,15 +122,6 @@ impl ModelTargets {
         Some(moe.nodes[idx].clone())
     }
 
-    /// List all available model names.
-    #[allow(dead_code)]
-    pub fn available_models(&self) -> Vec<String> {
-        self.targets
-            .keys()
-            .filter(|k| !self.targets[k.as_str()].is_empty())
-            .cloned()
-            .collect()
-    }
 }
 
 /// Compute shard index for a node given all node IDs in the MoE group.
@@ -251,7 +231,7 @@ pub async fn election_loop(
     draft: Option<std::path::PathBuf>,
     draft_max: u16,
     force_split: bool,
-    target_tx: watch::Sender<ModelTargets>,
+    target_tx: Arc<watch::Sender<ModelTargets>>,
     mut on_change: impl FnMut(bool, bool) + Send,
 ) {
     let mut peer_rx = node.peer_change_rx.clone();
@@ -567,7 +547,7 @@ async fn moe_election_loop(
     moe_cfg: download::MoeConfig,
     my_vram: u64,
     model_bytes: u64,
-    target_tx: watch::Sender<ModelTargets>,
+    target_tx: Arc<watch::Sender<ModelTargets>>,
     on_change: &mut impl FnMut(bool, bool),
 ) {
     let mut peer_rx = node.peer_change_rx.clone();
@@ -733,19 +713,45 @@ async fn update_targets(
     node: &mesh::Node,
     my_model: &str,
     my_target: InferenceTarget,
-    target_tx: &watch::Sender<ModelTargets>,
+    target_tx: &Arc<watch::Sender<ModelTargets>>,
 ) {
     let peers = node.peers().await;
     let mut targets: HashMap<String, Vec<InferenceTarget>> = HashMap::new();
+
+    // Start from the current targets — preserve local targets set by other election loops
+    // (multi-model per node: each loop manages its own model's entry)
+    {
+        let current = target_tx.borrow();
+        for (model, model_targets) in &current.targets {
+            if model != my_model {
+                // Keep only Local targets from other loops — remote targets get rebuilt below
+                let locals: Vec<_> = model_targets.iter()
+                    .filter(|t| matches!(t, InferenceTarget::Local(_) | InferenceTarget::MoeLocal(_)))
+                    .cloned()
+                    .collect();
+                if !locals.is_empty() {
+                    targets.insert(model.clone(), locals);
+                }
+            }
+        }
+    }
 
     // Our model — we're always first in the list
     if !matches!(my_target, InferenceTarget::None) {
         targets.entry(my_model.to_string()).or_default().push(my_target);
     }
 
-    // All peers — group by model
+    // All peers — group by model (multi-model aware)
     for p in &peers {
-        if let Some(ref serving) = p.serving {
+        // Collect all models this peer is serving
+        let peer_models: Vec<String> = if !p.serving_models.is_empty() {
+            p.serving_models.clone()
+        } else if let Some(ref s) = p.serving {
+            vec![s.clone()]
+        } else {
+            vec![]
+        };
+        for serving in &peer_models {
             if matches!(p.role, NodeRole::Host { .. }) {
                 // Peer is a confirmed host — add as target
                 targets.entry(serving.clone()).or_default().push(InferenceTarget::Remote(p.id));

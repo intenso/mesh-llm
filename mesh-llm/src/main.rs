@@ -7,6 +7,7 @@ mod moe;
 mod nostr;
 mod proxy;
 mod rewrite;
+mod router;
 mod tunnel;
 
 use anyhow::{Context, Result};
@@ -353,23 +354,17 @@ async fn main() -> Result<()> {
     }
 
     // --- Resolve models from CLI ---
-    // First --model is what we serve (resolve/download it).
-    // Additional --model entries are mesh wants (names only, no download).
+    // All --model entries get resolved/downloaded. First is primary (gets rpc/tunnel).
+    // Additional models run as solo llama-servers (must fit in VRAM independently).
     let mut resolved_models: Vec<PathBuf> = Vec::new();
-    if let Some(first) = cli.model.first() {
-        resolved_models.push(resolve_model(first).await?);
+    for m in &cli.model {
+        resolved_models.push(resolve_model(m).await?);
     }
 
-    // Build requested model names: served model + additional wants
-    let mut requested_model_names: Vec<String> = resolved_models.iter()
+    // Build requested model names from all resolved models
+    let requested_model_names: Vec<String> = resolved_models.iter()
         .filter_map(|m| m.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
         .collect();
-    for w in cli.model.iter().skip(1) {
-        let name = w.to_string_lossy().to_string();
-        if !requested_model_names.contains(&name) {
-            requested_model_names.push(name);
-        }
-    }
 
     let bin_dir = match &cli.bin_dir {
         Some(d) => d.clone(),
@@ -865,6 +860,18 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
         let assignment = pick_model_assignment(&node, &local_models).await;
+        // If no demand-based assignment but we have VRAM, use auto pack's primary model
+        let assignment = if assignment.is_none() && cli.auto && !is_client {
+            let pack = nostr::auto_model_pack(node.vram_bytes() as f64 / 1e9);
+            if !pack.is_empty() {
+                eprintln!("📋 No unserved demand — serving {} for {:.0}GB VRAM", pack[0], node.vram_bytes() as f64 / 1e9);
+                Some(pack[0].clone())
+            } else {
+                assignment
+            }
+        } else {
+            assignment
+        };
         if let Some(model_name) = assignment {
             eprintln!("Mesh assigned model: {model_name}");
             let model_path = mesh::find_model_path(&model_name);
@@ -922,8 +929,12 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         model_name.clone()
     };
     node.set_model_source(model_source).await;
-    node.set_serving(Some(model_name.clone())).await;
-    node.set_models(vec![model_name.clone()]).await;
+    // Set all serving models (primary + extras)
+    let all_serving: Vec<String> = resolved_models.iter()
+        .map(|m| m.file_stem().unwrap_or_default().to_string_lossy().to_string())
+        .collect();
+    node.set_serving_models(all_serving.clone()).await;
+    node.set_models(all_serving).await;
     // Re-gossip so peers learn what we're serving
     node.regossip().await;
 
@@ -950,6 +961,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
 
     // Election publishes per-model targets
     let (target_tx, target_rx) = tokio::sync::watch::channel(election::ModelTargets::default());
+    let target_tx = std::sync::Arc::new(target_tx);
 
     // Drop channel: API proxy sends model names to drop, main loop handles shutdown
     let (drop_tx, mut drop_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -1019,10 +1031,11 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     let model_name_for_cb = model_name.clone();
     let model_name_for_election = model_name.clone();
     let node_for_cb = node.clone();
+    let primary_target_tx = target_tx.clone();
     tokio::spawn(async move {
         election::election_loop(
             node2, tunnel_mgr2, rpc_port, bin_dir2, model2, model_name_for_election,
-            draft2, draft_max, force_split, target_tx,
+            draft2, draft_max, force_split, primary_target_tx,
             move |is_host, llama_ready| {
                 if llama_ready {
                     let n = node_for_cb.clone();
@@ -1052,6 +1065,46 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             },
         ).await;
     });
+
+    // Additional model election loops (multi-model per node)
+    // Each additional model gets its own solo election loop — no rpc, no draft, no split.
+    // They share the same target_tx so the proxy sees all models.
+    if resolved_models.len() > 1 {
+        eprintln!("🔀 Multi-model mode: {} additional model(s)", resolved_models.len() - 1);
+        // Announce all models to mesh
+        let all_names: Vec<String> = resolved_models.iter()
+            .map(|m| m.file_stem().unwrap_or_default().to_string_lossy().to_string())
+            .collect();
+        node.set_models(all_names).await;
+        node.regossip().await;
+
+        for extra_model in resolved_models.iter().skip(1) {
+            let extra_name = extra_model.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let extra_node = node.clone();
+            let extra_tunnel = tunnel_mgr.clone();
+            let extra_bin = bin_dir.clone();
+            let extra_path = extra_model.clone();
+            let extra_target_tx = target_tx.clone();
+            let extra_model_name = extra_name.clone();
+            let api_port_extra = api_port;
+            eprintln!("  + {extra_name}");
+            tokio::spawn(async move {
+                election::election_loop(
+                    extra_node, extra_tunnel, 0, extra_bin, extra_path, extra_model_name.clone(),
+                    None, 8, false, extra_target_tx,
+                    move |is_host, llama_ready| {
+                        if is_host && llama_ready {
+                            eprintln!("✅ [{extra_model_name}] ready (multi-model)");
+                            eprintln!("  API: http://localhost:{api_port_extra} (model={extra_model_name})");
+                        }
+                    },
+                ).await;
+            });
+        }
+    }
 
     // Nostr publish loop (if --publish) or watchdog (if --auto, to take over if publisher dies)
     let nostr_publisher = if cli.publish {
@@ -1333,7 +1386,28 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                         return;
                     }
 
-                    if let Some(ref name) = model_name {
+                    // Smart routing: if no model specified (or model="auto"), classify and pick
+                    let effective_model = if model_name.is_none() || model_name.as_deref() == Some("auto") {
+                        if let Some(body_json) = proxy::extract_body_json(&buf[..n]) {
+                            let cl = router::classify(&body_json);
+                            let available: Vec<(&str, f64)> = targets.targets.keys()
+                                .map(|name| (name.as_str(), 0.0))
+                                .collect();
+                            let picked = router::pick_model_classified(&cl, &available);
+                            if let Some(name) = picked {
+                                tracing::info!("router: {:?}/{:?} tools={} → {name}", cl.category, cl.complexity, cl.needs_tools);
+                                Some(name.to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        model_name.clone()
+                    };
+
+                    if let Some(ref name) = effective_model {
                         node.record_request(name);
                     }
 
@@ -1345,7 +1419,7 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                             .unwrap_or_else(|| format!("{_addr}"));
                         targets.get_moe_target(&session_hint)
                             .unwrap_or(first_available_target(&targets))
-                    } else if let Some(ref name) = model_name {
+                    } else if let Some(ref name) = effective_model {
                         let t = targets.get(name);
                         if matches!(t, election::InferenceTarget::None) {
                             tracing::debug!("Model '{}' not found, trying first available", name);
@@ -1660,17 +1734,16 @@ async fn probe_mesh_health(invite_token: &str, relay_urls: &[String]) -> Result<
 }
 
 /// Helper for StartNew path — configure CLI to start a new mesh.
-fn start_new_mesh(cli: &mut Cli, models: &[String], my_vram_gb: f64) {
+fn start_new_mesh(cli: &mut Cli, _models: &[String], my_vram_gb: f64) {
+    // Pick the best single model for this VRAM tier.
+    // Multi-model requires explicit --model A --model B.
+    let pack = nostr::auto_model_pack(my_vram_gb);
+    let primary = pack.first().cloned().unwrap_or_default();
     eprintln!("🆕 Starting a new mesh");
-    eprintln!("   Primary model: {}", models[0]);
-    if models.len() > 1 {
-        eprintln!("   Also declaring: {:?}", &models[1..]);
-    }
+    eprintln!("   Serving: {primary}");
     eprintln!("   VRAM: {:.0}GB", my_vram_gb);
     if cli.model.is_empty() {
-        for m in models {
-            cli.model.push(m.into());
-        }
+        cli.model.push(primary.into());
     }
     if !cli.publish {
         cli.publish = true;
