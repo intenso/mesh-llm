@@ -492,14 +492,20 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
 
         // ── Live status ──
         ("GET", "/api/status") => {
-            let status = state.status().await;
-            let json = serde_json::to_string(&status)?;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                json.len(),
-                json
-            );
-            stream.write_all(resp.as_bytes()).await?;
+            match tokio::time::timeout(std::time::Duration::from_secs(5), state.status()).await {
+                Ok(status) => {
+                    let json = serde_json::to_string(&status)?;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        json.len(),
+                        json
+                    );
+                    stream.write_all(resp.as_bytes()).await?;
+                }
+                Err(_) => {
+                    respond_error(&mut stream, 503, "Status temporarily unavailable").await?;
+                }
+            }
         }
 
         // ── SSE event stream ──

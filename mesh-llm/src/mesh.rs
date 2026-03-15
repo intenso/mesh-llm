@@ -1040,28 +1040,32 @@ impl Node {
     /// Get the mesh catalog: all models that any node has on disk or has requested.
     /// Returns deduplicated list of model names (file stems, no .gguf).
     pub async fn mesh_catalog(&self) -> Vec<String> {
-        let state = self.state.lock().await;
-        let my_available = self.available_models.lock().await;
-        let my_requested = self.requested_models.lock().await;
-        let my_serving = self.serving.lock().await;
+        // Snapshot each lock independently to avoid holding multiple locks.
+        let my_available = self.available_models.lock().await.clone();
+        let my_requested = self.requested_models.lock().await.clone();
+        let my_serving = self.serving.lock().await.clone();
+        let peer_data: Vec<_> = {
+            let state = self.state.lock().await;
+            state.peers.values().map(|p| (p.available_models.clone(), p.requested_models.clone(), p.serving.clone())).collect()
+        };
         let mut all = std::collections::HashSet::new();
-        for m in my_available.iter() {
+        for m in &my_available {
             all.insert(m.clone());
         }
-        for m in my_requested.iter() {
+        for m in &my_requested {
             all.insert(m.clone());
         }
-        if let Some(ref s) = *my_serving {
+        if let Some(ref s) = my_serving {
             all.insert(s.clone());
         }
-        for p in state.peers.values() {
-            for m in &p.available_models {
+        for (avail, req, serving) in &peer_data {
+            for m in avail {
                 all.insert(m.clone());
             }
-            for m in &p.requested_models {
+            for m in req {
                 all.insert(m.clone());
             }
-            if let Some(ref s) = p.serving {
+            if let Some(ref s) = serving {
                 all.insert(s.clone());
             }
         }
@@ -1072,28 +1076,27 @@ impl Node {
 
     /// Get all models currently being served in the mesh (loaded in VRAM somewhere).
     pub async fn models_being_served(&self) -> Vec<String> {
-        let state = self.state.lock().await;
-        let my_serving_models = self.serving_models.lock().await;
-        let my_serving = self.serving.lock().await;
+        let my_serving_models = self.serving_models.lock().await.clone();
+        let my_serving = self.serving.lock().await.clone();
+        let peer_data: Vec<_> = {
+            let state = self.state.lock().await;
+            state.peers.values().map(|p| (p.serving_models.clone(), p.serving.clone())).collect()
+        };
         let mut served = std::collections::HashSet::new();
-        // Multi-model: all models this node is serving
-        for s in my_serving_models.iter() {
+        for s in &my_serving_models {
             served.insert(s.clone());
         }
-        // Fallback: single serving field (for nodes not yet multi-model aware)
         if my_serving_models.is_empty() {
-            if let Some(ref s) = *my_serving {
+            if let Some(ref s) = my_serving {
                 served.insert(s.clone());
             }
         }
-        for p in state.peers.values() {
-            // Multi-model peers
-            for s in &p.serving_models {
-                served.insert(s.clone());
+        for (sm, s) in &peer_data {
+            for m in sm {
+                served.insert(m.clone());
             }
-            // Fallback for old peers
-            if p.serving_models.is_empty() {
-                if let Some(ref s) = p.serving {
+            if sm.is_empty() {
+                if let Some(ref s) = s {
                     served.insert(s.clone());
                 }
             }
@@ -1135,33 +1138,35 @@ impl Node {
 
     /// Build the current routing table from this node's view of the mesh.
     pub async fn routing_table(&self) -> RoutingTable {
-        let state = self.state.lock().await;
-        let my_serving = self.serving.lock().await;
+        let my_serving = self.serving.lock().await.clone();
         let my_role = self.role.lock().await.clone();
+        let peer_data: Vec<_> = {
+            let state = self.state.lock().await;
+            state.peers.values().map(|p| (p.id, p.role.clone(), p.serving.clone(), p.vram_bytes)).collect()
+        };
         let mut hosts = Vec::new();
 
         // Include self if we're a host
         if matches!(my_role, NodeRole::Host { .. }) {
-            if let Some(ref model) = *my_serving {
+            if let Some(ref model) = my_serving {
                 hosts.push(RouteEntry {
                     model: model.clone(),
                     node_id: format!("{}", self.endpoint.id().fmt_short()),
                     endpoint_id: self.endpoint.id(),
                     vram_gb: self.vram_bytes as f64 / 1e9,
-
                 });
             }
         }
 
         // Include peers that are hosts
-        for p in state.peers.values() {
-            if matches!(p.role, NodeRole::Host { .. }) {
-                if let Some(ref model) = p.serving {
+        for (id, role, serving, vram_bytes) in &peer_data {
+            if matches!(role, NodeRole::Host { .. }) {
+                if let Some(ref model) = serving {
                     hosts.push(RouteEntry {
                         model: model.clone(),
-                        node_id: format!("{}", p.id.fmt_short()),
-                        endpoint_id: p.id,
-                        vram_gb: p.vram_bytes as f64 / 1e9,
+                        node_id: format!("{}", id.fmt_short()),
+                        endpoint_id: *id,
+                        vram_gb: *vram_bytes as f64 / 1e9,
                     });
                 }
             }
@@ -1503,16 +1508,17 @@ impl Node {
                                 let dead_id = EndpointId::from(pk);
                                 if dead_id != node.endpoint.id() {
                                     // Verify: try to reach the dead peer ourselves before removing
-                                    let should_remove = {
+                                    let conn_opt = {
                                         let state = node.state.lock().await;
-                                        if let Some(conn) = state.connections.get(&dead_id) {
-                                            tokio::time::timeout(
-                                                std::time::Duration::from_secs(3),
-                                                conn.open_bi(),
-                                            ).await.is_err()
-                                        } else {
-                                            true // no connection = already gone
-                                        }
+                                        state.connections.get(&dead_id).cloned()
+                                    };
+                                    let should_remove = if let Some(conn) = conn_opt {
+                                        tokio::time::timeout(
+                                            std::time::Duration::from_secs(3),
+                                            conn.open_bi(),
+                                        ).await.is_err()
+                                    } else {
+                                        true // no connection = already gone
                                     };
                                     if should_remove {
                                         eprintln!("⚠️  Peer {} reported dead by {}, confirmed, removing",
@@ -1910,7 +1916,7 @@ impl Node {
     }
 
     async fn collect_announcements(&self) -> Vec<PeerAnnouncement> {
-        let state = self.state.lock().await;
+        // Snapshot all locks independently — never hold multiple locks simultaneously.
         let my_role = self.role.lock().await.clone();
         let my_models = self.models.lock().await.clone();
         let my_source = self.model_source.lock().await.clone();
@@ -1921,24 +1927,26 @@ impl Node {
         let my_mesh_id = self.mesh_id.lock().await.clone();
         let my_demand = self.get_demand();
         let stale_cutoff = std::time::Instant::now() - std::time::Duration::from_secs(PEER_STALE_SECS);
-        let mut announcements: Vec<PeerAnnouncement> = state.peers.values()
-            .filter(|p| p.last_seen >= stale_cutoff)
-            .map(|p| PeerAnnouncement {
-                addr: p.addr.clone(),
-                role: p.role.clone(),
-                models: p.models.clone(),
-                vram_bytes: p.vram_bytes,
-                model_source: p.model_source.clone(),
-                serving: p.serving.clone(),
-                serving_models: p.serving_models.clone(),
-                available_models: p.available_models.clone(),
-                requested_models: p.requested_models.clone(),
-                version: p.version.clone(),
-                // Mesh-wide fields left as default (empty) on non-self entries
-                model_demand: HashMap::new(),
-                mesh_id: None,
-            })
-            .collect();
+        let mut announcements: Vec<PeerAnnouncement> = {
+            let state = self.state.lock().await;
+            state.peers.values()
+                .filter(|p| p.last_seen >= stale_cutoff)
+                .map(|p| PeerAnnouncement {
+                    addr: p.addr.clone(),
+                    role: p.role.clone(),
+                    models: p.models.clone(),
+                    vram_bytes: p.vram_bytes,
+                    model_source: p.model_source.clone(),
+                    serving: p.serving.clone(),
+                    serving_models: p.serving_models.clone(),
+                    available_models: p.available_models.clone(),
+                    requested_models: p.requested_models.clone(),
+                    version: p.version.clone(),
+                    model_demand: HashMap::new(),
+                    mesh_id: None,
+                })
+                .collect()
+        };
         // Self entry carries the mesh-wide fields once
         announcements.push(PeerAnnouncement {
             addr: self.endpoint.addr(),

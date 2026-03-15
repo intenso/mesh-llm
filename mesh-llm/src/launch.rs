@@ -158,13 +158,20 @@ pub async fn start_llama_server(
     let log_file2 = log_file.try_clone()?;
 
     // llama-server uses --rpc only for remote workers.
-    // Context size: 64K for all models. Large enough for agent workloads
-    // (pi sends ~4K tokens for system prompt + tools, multi-turn conversations
-    // easily reach 16-32K). 128K hangs on some model+draft combinations.
+    // Context size: scale to available VRAM. We want 64K+ for agent workloads
+    // but must not OOM on small machines (e.g. 16GB with an 8B model).
     const GB: u64 = 1_000_000_000;
-    let ctx_size: u32 = 65536;
-    let _ = my_vram;
-    tracing::info!("Context size: {ctx_size} tokens (model {:.1}GB, {:.0}GB VRAM)", model_bytes as f64 / GB as f64, my_vram as f64 / GB as f64);
+    let vram_after_model = my_vram.saturating_sub(model_bytes);
+    let ctx_size: u32 = if vram_after_model >= 30 * GB {
+        65536  // 30GB+ free: full 64K context
+    } else if vram_after_model >= 12 * GB {
+        32768  // 12-30GB free: 32K
+    } else if vram_after_model >= 4 * GB {
+        8192   // 4-12GB free: 8K
+    } else {
+        4096   // <4GB free: minimal
+    };
+    tracing::info!("Context size: {ctx_size} tokens (model {:.1}GB, {:.0}GB VRAM, {:.1}GB free)", model_bytes as f64 / GB as f64, my_vram as f64 / GB as f64, vram_after_model as f64 / GB as f64);
 
     let mut args = vec![
         "-m".to_string(), model.to_string_lossy().to_string(),
