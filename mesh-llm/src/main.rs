@@ -16,7 +16,7 @@ use clap::{Parser, Subcommand};
 use mesh::NodeRole;
 use std::path::PathBuf;
 
-pub const VERSION: &str = "0.37.1";
+pub const VERSION: &str = "0.37.2";
 
 #[derive(Parser, Debug)]
 #[command(name = "mesh-llm", version = VERSION, about = "P2P mesh for distributed llama.cpp inference over QUIC")]
@@ -2075,6 +2075,11 @@ async fn run_claude(model: Option<String>, port: u16) -> Result<()> {
     // llama-server natively serves the Anthropic /v1/messages API, and
     // mesh-llm's TCP tunnel passes it through transparently. No proxy needed.
     let base_url = format!("http://127.0.0.1:{port}");
+    // Settings optimized for local LLMs.
+    // CLAUDE_CODE_ATTRIBUTION_HEADER=0 is critical — without it, Claude Code
+    // prepends a changing attribution header that invalidates the KV cache on
+    // every request, making inference ~90% slower. See:
+    // https://unsloth.ai/docs/basics/claude-code
     let settings = serde_json::json!({
         "env": {
             "ANTHROPIC_BASE_URL": &base_url,
@@ -2085,13 +2090,21 @@ async fn run_claude(model: Option<String>, port: u16) -> Result<()> {
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": &chosen,
             "CLAUDE_CODE_SUBAGENT_MODEL": &chosen,
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
-            "DISABLE_PROMPT_CACHING": "1",
-            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+            "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+            "DISABLE_PROMPT_CACHING": "1",
             "DISABLE_AUTOUPDATER": "1",
             "DISABLE_TELEMETRY": "1",
             "DISABLE_ERROR_REPORTING": "1"
-        }
+        },
+        "attribution": {
+            "commit": "",
+            "pr": ""
+        },
+        "prefersReducedMotion": true,
+        "terminalProgressBarEnabled": false
     });
     let settings_json = serde_json::to_string(&settings)?;
 
