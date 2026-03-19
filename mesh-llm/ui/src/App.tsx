@@ -70,6 +70,8 @@ import { cn } from './lib/utils';
 import githubBlackLogo from './assets/icons/github-invertocat-black.svg';
 import githubWhiteLogo from './assets/icons/github-invertocat-white.svg';
 
+const DOCS_URL = 'https://michaelneale.github.io/decentralized-inference';
+
 type MeshModel = {
   name: string;
   status: 'warm' | 'cold' | string;
@@ -1235,7 +1237,7 @@ function AppHeader({
               ) : null}
               <div className="text-xs text-muted-foreground">
                 Use with Claude Code, Goose, pi, or any OpenAI-compatible client.{' '}
-                <a href="https://mesh-llm.com/#agents" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+                <a href={`${DOCS_URL}/#agents`} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
                   Setup guide →
                 </a>
               </div>
@@ -1874,8 +1876,18 @@ function InviteFriendEmptyState({ inviteToken, selectedModel, isPublicMesh }: { 
               <div className="text-xs font-medium">Run your own private mesh</div>
               <div className="text-xs text-muted-foreground">
                 Pool machines across your home, office, or friends — fully private, no cloud needed.{' '}
-                <a href="https://mesh-llm.com" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+                <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
                   Getting started →
+                </a>
+              </div>
+            </div>
+            <Separator />
+            <div className="space-y-2">
+              <div className="text-xs font-medium">Use with coding agents</div>
+              <div className="text-xs text-muted-foreground">
+                Works with Claude Code, Goose, pi, and any OpenAI-compatible client.{' '}
+                <a href={`${DOCS_URL}/#agents`} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+                  Agent setup →
                 </a>
               </div>
             </div>
@@ -1916,6 +1928,11 @@ function InviteFriendEmptyState({ inviteToken, selectedModel, isPublicMesh }: { 
             >
               {inviteWithModelCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
             </Button>
+          </div>
+          <div className="text-xs text-muted-foreground pt-1">
+            <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+              Docs — models, agents, common patterns →
+            </a>
           </div>
         </div>
       ) : null}
@@ -2216,6 +2233,24 @@ function DashboardPage({
           document.body,
         )
         : null}
+
+      <div className="flex items-center justify-center gap-3 py-2 text-xs text-muted-foreground">
+        <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className="underline-offset-2 hover:text-foreground hover:underline">
+          Docs
+        </a>
+        <span>·</span>
+        <a href={`${DOCS_URL}/#agents`} target="_blank" rel="noopener noreferrer" className="underline-offset-2 hover:text-foreground hover:underline">
+          Agents
+        </a>
+        <span>·</span>
+        <a href={`${DOCS_URL}/#models`} target="_blank" rel="noopener noreferrer" className="underline-offset-2 hover:text-foreground hover:underline">
+          Models
+        </a>
+        <span>·</span>
+        <a href={`${DOCS_URL}/#running`} target="_blank" rel="noopener noreferrer" className="underline-offset-2 hover:text-foreground hover:underline">
+          Common patterns
+        </a>
+      </div>
     </div>
   );
 }
