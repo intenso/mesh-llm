@@ -478,10 +478,12 @@ export function App() {
     const token = status?.token ?? '';
     return token ? `mesh-llm --client --join ${token}` : '';
   }, [status?.token]);
+  const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
   const apiDirectUrl = useMemo(() => {
+    if (!isLocalhost) return '';
     const port = status?.api_port ?? 9337;
     return `http://127.0.0.1:${port}/v1`;
-  }, [status?.api_port]);
+  }, [status?.api_port, isLocalhost]);
 
   useEffect(() => {
     if (!warmModels.length) return;
@@ -986,7 +988,7 @@ export function App() {
   }, [status]);
 
   const sections: Array<{ key: TopSection; label: string }> = [
-    { key: 'dashboard', label: 'Dashboard' },
+    { key: 'dashboard', label: 'Network' },
     { key: 'chat', label: 'Chat' },
   ];
 
@@ -1068,6 +1070,9 @@ export function App() {
                   topologyNodes={topologyNodes}
                   selectedModel={selectedModel || status?.model_name || ''}
                   themeMode={themeMode}
+                  isPublicMesh={isPublicMesh}
+                  inviteToken={inviteToken}
+                  isLocalhost={isLocalhost}
                 />
               </div>
             </div>
@@ -1271,7 +1276,31 @@ function AppHeader({
                     {apiDirectCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
                   </Button>
                 </div>
-              ) : null}
+              ) : (
+                <div className="space-y-2">
+                  <div className="text-xs text-muted-foreground">
+                    Run mesh-llm locally to get an OpenAI-compatible API on your machine:
+                  </div>
+                  <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                    <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                      {isPublicMesh ? 'mesh-llm --auto' : `mesh-llm --auto --join ${inviteToken || '(token)'}`}
+                    </code>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6 shrink-0"
+                      aria-label="Copy command"
+                      onClick={() => void navigator.clipboard.writeText(isPublicMesh ? 'mesh-llm --auto' : `mesh-llm --auto --join ${inviteToken || ''}`)}
+                    >
+                      <Copy className="h-3 w-3" />
+                    </Button>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    This gives you <code className="text-[0.7rem]">http://127.0.0.1:9337/v1</code> locally — point any OpenAI-compatible app at it.
+                  </div>
+                </div>
+              )}
               <div className="space-y-2 pt-1">
                 <div className="text-xs font-medium">Use with agents</div>
                 <div className="space-y-1">
@@ -2093,11 +2122,17 @@ function DashboardPage({
   topologyNodes,
   selectedModel,
   themeMode,
+  isPublicMesh,
+  inviteToken,
+  isLocalhost,
 }: {
   status: StatusPayload | null;
   topologyNodes: TopologyNode[];
   selectedModel: string;
   themeMode: ThemeMode;
+  isPublicMesh: boolean;
+  inviteToken: string;
+  isLocalhost: boolean;
 }) {
   const [modelFilter, setModelFilter] = useState<'all' | 'warm' | 'cold'>('all');
   const [isMeshOverviewFullscreen, setIsMeshOverviewFullscreen] = useState(false);
@@ -2384,6 +2419,53 @@ function DashboardPage({
           document.body,
         )
         : null}
+
+      {/* Connect panel */}
+      <Card className="mt-4">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">Connect</CardTitle>
+          <div className="text-xs text-muted-foreground">
+            Run mesh-llm on your machine to get a local OpenAI-compatible API and contribute compute to the mesh.
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="space-y-1.5">
+            <div className="text-xs font-medium">1. Install</div>
+            <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+              <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                curl -fsSL https://mesh-llm.com/install | bash
+              </code>
+              <Button type="button" size="icon" variant="ghost" className="h-6 w-6 shrink-0" aria-label="Copy" onClick={() => void navigator.clipboard.writeText('curl -fsSL https://mesh-llm.com/install | bash')}>
+                <Copy className="h-3 w-3" />
+              </Button>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <div className="text-xs font-medium">2. Run</div>
+            {(() => {
+              const cmd = isPublicMesh ? 'mesh-llm --auto' : `mesh-llm --auto --join ${inviteToken || '(token)'}`;
+              return (
+                <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                  <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">{cmd}</code>
+                  <Button type="button" size="icon" variant="ghost" className="h-6 w-6 shrink-0" aria-label="Copy" onClick={() => void navigator.clipboard.writeText(cmd)}>
+                    <Copy className="h-3 w-3" />
+                  </Button>
+                </div>
+              );
+            })()}
+            <div className="text-xs text-muted-foreground">
+              This auto-selects a model for your hardware, joins the mesh, and serves a local API at <code className="text-[0.7rem]">http://127.0.0.1:9337/v1</code>
+            </div>
+          </div>
+          {isLocalhost ? null : (
+            <div className="text-xs text-muted-foreground">
+              <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+                Full docs →
+              </a>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="flex items-center justify-center gap-3 py-2 text-xs text-muted-foreground">
         <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className="underline-offset-2 hover:text-foreground hover:underline">
