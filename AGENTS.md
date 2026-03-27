@@ -75,6 +75,10 @@ For changes in `mesh-llm/ui/`, use components and compose interfaces consistentl
 
 Read `mesh-llm/docs/TESTING.md` before running tests. It has all test scenarios, remote deploy instructions, and cleanup commands.
 
+## Formatting
+
+Before committing any Rust changes, run `cargo fmt --all` from the repo root and ensure the formatting changes are included in the commit.
+
 ### Deploy to Remote
 
 ```bash
