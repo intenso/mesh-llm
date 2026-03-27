@@ -16,6 +16,16 @@ fn temp_log_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
+fn command_has_output(command: &str, args: &[&str]) -> bool {
+    let Ok(output) = std::process::Command::new(command).args(args).output() else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| !line.trim().is_empty())
+}
+
 /// Start a local rpc-server and return the port it's listening on.
 /// Picks an available port automatically.
 /// If `gguf_path` is provided, passes `--gguf` so the server loads weights from the local file.
@@ -286,21 +296,30 @@ pub async fn start_llama_server(
         args.push("--tensor-split".to_string());
         args.push(ts.to_string());
     }
+    let local_device = detect_device();
     if let Some(draft_path) = draft {
         if draft_path.exists() {
-            args.push("-md".to_string());
-            args.push(draft_path.to_string_lossy().to_string());
-            args.push("-ngld".to_string());
-            args.push("99".to_string());
-            args.push("--device-draft".to_string());
-            args.push("MTL0".to_string());
-            args.push("--draft-max".to_string());
-            args.push(draft_max.to_string());
-            tracing::info!(
-                "Speculative decoding: draft={}, draft-max={}",
-                draft_path.display(),
-                draft_max
-            );
+            if local_device != "CPU" {
+                args.push("-md".to_string());
+                args.push(draft_path.to_string_lossy().to_string());
+                args.push("-ngld".to_string());
+                args.push("99".to_string());
+                args.push("--device-draft".to_string());
+                args.push(local_device.clone());
+                args.push("--draft-max".to_string());
+                args.push(draft_max.to_string());
+                tracing::info!(
+                    "Speculative decoding: draft={}, draft-max={}, device={}",
+                    draft_path.display(),
+                    draft_max,
+                    local_device
+                );
+            } else {
+                tracing::warn!(
+                    "Draft model present at {} but no GPU backend detected, skipping speculative decoding",
+                    draft_path.display()
+                );
+            }
         } else {
             tracing::warn!(
                 "Draft model not found at {}, skipping speculative decoding",
@@ -383,19 +402,8 @@ fn detect_device() -> String {
     }
 
     // Linux: check for NVIDIA CUDA
-    if let Ok(output) = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=name", "--format=csv,noheader"])
-        .output()
-    {
-        if output.status.success() {
-            let gpu_count = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .count();
-            if gpu_count > 0 {
-                return "CUDA0".to_string();
-            }
-        }
+    if command_has_output("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"]) {
+        return "CUDA0".to_string();
     }
 
     // Linux: check for NVIDIA Tegra/Jetson (tegrastats — Jetson AGX/NX devices support CUDA)
@@ -412,7 +420,9 @@ fn detect_device() -> String {
     }
 
     // Linux: check for AMD ROCm/HIP
-    if std::path::Path::new("/opt/rocm").exists() {
+    if command_has_output("rocm-smi", &["--showproductname"])
+        || command_has_output("rocminfo", &[])
+    {
         return "HIP0".to_string();
     }
 

@@ -122,7 +122,7 @@ struct Cli {
     #[arg(long, hide = true)]
     bin_dir: Option<PathBuf>,
 
-    /// Device for rpc-server (e.g. MTL0, CPU).
+    /// Device for rpc-server (e.g. MTL0, CUDA0, HIP0, Vulkan0, CPU).
     #[arg(long, hide = true)]
     device: Option<String>,
 

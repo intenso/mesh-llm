@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# build-linux.sh — build llama.cpp (CUDA) + mesh-llm on Linux
+# build-linux.sh — build llama.cpp + mesh-llm on Linux
 #
-# Usage: scripts/build-linux.sh [--clean] [cuda_arch]
-#   --clean     Wipe the build dir before cmake (required on arch change).
-#   cuda_arch   SM integer for CMAKE_CUDA_ARCHITECTURES (e.g. 87, 90, 120).
-#               If omitted, scripts/detect-cuda-arch.sh is invoked to detect it.
+# Usage:
+#   scripts/build-linux.sh [--clean] [--backend cuda|rocm] [--cuda-arch SM_LIST] [--rocm-arch GFX_LIST]
+#
+# Examples:
+#   scripts/build-linux.sh
+#   scripts/build-linux.sh --backend cuda --cuda-arch '120;86'
+#   scripts/build-linux.sh --backend rocm --rocm-arch 'gfx942;gfx90a'
 #
 # Must be run from the repository root.
 
@@ -19,39 +22,133 @@ MESH_DIR="$REPO_ROOT/mesh-llm"
 UI_DIR="$MESH_DIR/ui"
 
 CLEAN=0
+BACKEND=""
 CUDA_ARCH=""
+ROCM_ARCH=""
 
-for ARG in "$@"; do
-    case "$ARG" in
-        --clean) CLEAN=1 ;;
-        *)       [[ -z "$CUDA_ARCH" ]] && CUDA_ARCH="$ARG" ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --clean)
+            CLEAN=1
+            shift
+            ;;
+        --backend)
+            BACKEND="${2:-}"
+            shift 2
+            ;;
+        --cuda-arch)
+            CUDA_ARCH="${2:-}"
+            shift 2
+            ;;
+        --rocm-arch)
+            ROCM_ARCH="${2:-}"
+            shift 2
+            ;;
+        *)
+            # Backward compatibility: treat a bare arg as cuda_arch.
+            [[ -z "$CUDA_ARCH" ]] && CUDA_ARCH="$1"
+            shift
+            ;;
     esac
 done
 
-if [[ -z "$CUDA_ARCH" ]]; then
-    echo "No cuda_arch specified — running auto-detection..."
-    CUDA_ARCH="$("$SCRIPT_DIR/detect-cuda-arch.sh")"
-    echo "Using SM ${CUDA_ARCH}"
-fi
+detect_backend() {
+    if command -v nvidia-smi &>/dev/null; then
+        echo cuda
+        return 0
+    fi
+    if command -v tegrastats &>/dev/null; then
+        echo cuda
+        return 0
+    fi
+    if command -v nvcc &>/dev/null; then
+        echo cuda
+        return 0
+    fi
+    if command -v rocm-smi &>/dev/null; then
+        echo rocm
+        return 0
+    fi
+    if command -v rocminfo &>/dev/null; then
+        echo rocm
+        return 0
+    fi
+    if command -v hipcc &>/dev/null; then
+        echo rocm
+        return 0
+    fi
+    if [[ -x /opt/rocm/bin/hipcc ]]; then
+        echo rocm
+        return 0
+    fi
+    echo cuda
+}
 
-# Locate nvcc — check PATH first, then common install locations
-if ! command -v nvcc &>/dev/null; then
+locate_nvcc() {
+    if command -v nvcc &>/dev/null; then
+        return 0
+    fi
     for CANDIDATE in /usr/local/cuda/bin /opt/cuda/bin /usr/cuda/bin; do
         if [[ -x "$CANDIDATE/nvcc" ]]; then
             export PATH="$CANDIDATE:$PATH"
-            break
+            return 0
         fi
     done
+    return 1
+}
+
+locate_hip_toolchain() {
+    if command -v hipcc &>/dev/null; then
+        return 0
+    fi
+    for CANDIDATE in /opt/rocm/bin /usr/lib/rocm/bin /usr/local/rocm/bin; do
+        if [[ -x "$CANDIDATE/hipcc" ]]; then
+            export PATH="$CANDIDATE:$PATH"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [[ -z "$BACKEND" ]]; then
+    BACKEND="$(detect_backend)"
 fi
 
-if ! command -v nvcc &>/dev/null; then
-    echo "Error: nvcc not found. Install the CUDA toolkit and ensure nvcc is in your PATH." >&2
-    echo "  Arch Linux:    sudo pacman -S cuda" >&2
-    echo "  Ubuntu/Debian: sudo apt install nvidia-cuda-toolkit" >&2
-    exit 1
-fi
-
-echo "Using nvcc: $(command -v nvcc) ($(nvcc --version | grep release | awk '{print $5}' | tr -d ','))"
+case "$BACKEND" in
+    cuda)
+        locate_nvcc || {
+            echo "Error: nvcc not found. Install the CUDA toolkit and ensure nvcc is in your PATH." >&2
+            echo "  Arch Linux:    sudo pacman -S cuda" >&2
+            echo "  Ubuntu/Debian: sudo apt install nvidia-cuda-toolkit" >&2
+            exit 1
+        }
+        if [[ -z "$CUDA_ARCH" ]]; then
+            echo "No cuda_arch specified — running auto-detection..."
+            CUDA_ARCH="$("$SCRIPT_DIR/detect-cuda-arch.sh")"
+            echo "Using SM ${CUDA_ARCH}"
+        fi
+        echo "Building Linux backend: CUDA"
+        echo "Using nvcc: $(command -v nvcc) ($(nvcc --version | grep release | awk '{print $5}' | tr -d ','))"
+        ;;
+    rocm)
+        locate_hip_toolchain || {
+            echo "Error: hipcc not found. Install ROCm and ensure hipcc is in your PATH." >&2
+            echo "  Typical location: /opt/rocm/bin/hipcc" >&2
+            exit 1
+        }
+        if [[ -z "$ROCM_ARCH" ]]; then
+            echo "No rocm_arch specified — running auto-detection..."
+            ROCM_ARCH="$("$SCRIPT_DIR/detect-rocm-arch.sh")"
+            echo "Using AMDGPU_TARGETS ${ROCM_ARCH}"
+        fi
+        echo "Building Linux backend: ROCm/HIP"
+        echo "Using hipcc: $(command -v hipcc)"
+        ;;
+    *)
+        echo "Error: unsupported backend '$BACKEND' (expected 'cuda' or 'rocm')." >&2
+        exit 1
+        ;;
+esac
 
 if [[ ! -d "$LLAMA_DIR" ]]; then
     echo "Cloning michaelneale/llama.cpp (rebase-upstream-master)..."
@@ -74,13 +171,29 @@ if [[ "$CLEAN" -eq 1 && -d "$BUILD_DIR" ]]; then
     rm -rf "$BUILD_DIR"
 fi
 
-cmake -B "$BUILD_DIR" -S "$LLAMA_DIR" \
-    -DGGML_CUDA=ON \
-    -DGGML_METAL=OFF \
-    -DGGML_RPC=ON \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DLLAMA_OPENSSL=OFF \
-    -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH"
+if [[ "$BACKEND" == "cuda" ]]; then
+    cmake -B "$BUILD_DIR" -S "$LLAMA_DIR" \
+        -DGGML_CUDA=ON \
+        -DGGML_HIP=OFF \
+        -DGGML_METAL=OFF \
+        -DGGML_RPC=ON \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DLLAMA_OPENSSL=OFF \
+        -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH"
+else
+    if command -v hipconfig &>/dev/null; then
+        export HIPCXX="$(hipconfig -l)/clang"
+        export HIP_PATH="$(hipconfig -R)"
+    fi
+    cmake -B "$BUILD_DIR" -S "$LLAMA_DIR" \
+        -DGGML_CUDA=OFF \
+        -DGGML_HIP=ON \
+        -DGGML_METAL=OFF \
+        -DGGML_RPC=ON \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DLLAMA_OPENSSL=OFF \
+        -DAMDGPU_TARGETS="$ROCM_ARCH"
+fi
 
 cmake --build "$BUILD_DIR" --config Release -j"$(nproc)"
 echo "llama.cpp build complete: $BUILD_DIR/bin/"

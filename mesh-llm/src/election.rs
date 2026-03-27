@@ -1020,7 +1020,7 @@ async fn start_llama(
     }
 
     // Build --rpc list: only remote workers.
-    // The host's own GPU is used directly via Metal — no need to route
+    // The host's own GPU is used directly on the local backend — no need to route
     // through the local rpc-server (which would add unnecessary TCP round trips).
     let all_ports = tunnel_mgr.peer_ports_map().await;
     let mut rpc_ports: Vec<u16> = Vec::new();
@@ -1031,7 +1031,7 @@ async fn start_llama(
     }
 
     // Calculate tensor split from VRAM.
-    // Device order: RPC workers first (matching --rpc order), then Metal (host) last.
+    // Device order: RPC workers first (matching --rpc order), then the local host device last.
     let my_vram_f = my_vram as f64;
     let mut all_vrams: Vec<f64> = Vec::new();
     for id in &worker_ids {
@@ -1043,7 +1043,7 @@ async fn start_llama(
             });
         }
     }
-    all_vrams.push(my_vram_f); // Metal is last device
+    all_vrams.push(my_vram_f); // Host device is last
     let total: f64 = all_vrams.iter().sum();
     let split = if total > 0.0 && !rpc_ports.is_empty() {
         let s: Vec<String> = all_vrams

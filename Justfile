@@ -7,14 +7,16 @@ ui_dir := mesh_dir / "ui"
 models_dir := env("HOME") / ".models"
 model := models_dir / "GLM-4.7-Flash-Q4_K_M.gguf"
 
-# Build for the current platform (macOS→Metal, Linux→CUDA with auto-detected arch)
+# Build for the current platform (macOS→Metal, Linux→CUDA/ROCm auto-detected)
 [macos]
 build: build-mac
 
-# Pass cuda_arch to override auto-detection (e.g. just build cuda_arch=90)
+# Linux overrides:
+#   just build backend=cuda cuda_arch='120;86'
+#   just build backend=rocm rocm_arch='gfx942;gfx90a'
 [linux]
-build cuda_arch="":
-    @scripts/build-linux.sh "{{ cuda_arch }}"
+build backend="" cuda_arch="" rocm_arch="":
+    @scripts/build-linux.sh --backend "{{ backend }}" --cuda-arch "{{ cuda_arch }}" --rocm-arch "{{ rocm_arch }}"
 
 # Build on macOS Apple Silicon (Metal + RPC)
 build-mac:
@@ -47,11 +49,9 @@ build-mac:
         echo "Mesh binary: target/release/mesh-llm"
     fi
 
-# Build on Linux with CUDA — delegates to scripts/build-linux.sh
-
-# cuda_arch overrides auto-detection (see scripts/detect-cuda-arch.sh for supported GPUs)
-build-linux cuda_arch="":
-    @scripts/build-linux.sh "{{ cuda_arch }}"
+# Build on Linux with CUDA or ROCm — delegates to scripts/build-linux.sh
+build-linux backend="" cuda_arch="" rocm_arch="":
+    @scripts/build-linux.sh --backend "{{ backend }}" --cuda-arch "{{ cuda_arch }}" --rocm-arch "{{ rocm_arch }}"
 
 # Build release artifacts for the current platform.
 
@@ -61,7 +61,24 @@ release-build:
 
 # Build a Linux CUDA release artifact with an explicit architecture list.
 release-build-cuda cuda_arch="75;80;86;89;90;120":
-    @scripts/build-linux.sh "{{ cuda_arch }}"
+    @scripts/build-linux.sh --backend cuda --cuda-arch "{{ cuda_arch }}"
+
+# Build a Linux AMD ROCm release artifact with an explicit architecture list.
+release-build-amd amd_arch="gfx90a;gfx942;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201":
+    @scripts/build-linux-amd.sh "{{ amd_arch }}"
+
+# Build a Linux AMD ROCm release artifact inside Docker.
+release-rocm-docker amd_arch="" image="rocm/dev-ubuntu-24.04:7.0-complete" platform="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ARGS=(--build-only --image "{{ image }}")
+    if [ -n "{{ amd_arch }}" ]; then
+        ARGS+=(--rocm-arch "{{ amd_arch }}")
+    fi
+    if [ -n "{{ platform }}" ]; then
+        ARGS+=(--platform "{{ platform }}")
+    fi
+    exec scripts/run-rocm-docker-build.sh "${ARGS[@]}"
 
 # Bump release version consistently across source and Cargo manifests.
 release-version version:
@@ -83,8 +100,14 @@ download-model:
 # ── Raw TCP (no mesh) ──────────────────────────────────────────
 
 # Start rpc-server (worker) with local GGUF loading
-worker host="0.0.0.0" port="50052" device="MTL0" gguf=model:
-    {{ build_dir }}/bin/rpc-server --host {{ host }} --port {{ port }} -d {{ device }} --gguf {{ gguf }}
+worker host="0.0.0.0" port="50052" device="" gguf=model:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DEVICE="{{ device }}"
+    if [ -z "$DEVICE" ]; then
+        DEVICE="$(scripts/detect-llama-device.sh)"
+    fi
+    exec {{ build_dir }}/bin/rpc-server --host {{ host }} --port {{ port }} -d "$DEVICE" --gguf {{ gguf }}
 
 # Start llama-server (orchestrator) pointing at an RPC worker
 serve rpc="127.0.0.1:50052" port="8080" gguf=model:
@@ -98,8 +121,9 @@ serve rpc="127.0.0.1:50052" port="8080" gguf=model:
 local: build download-model
     #!/usr/bin/env bash
     set -euo pipefail
+    DEVICE="$(scripts/detect-llama-device.sh)"
     echo "Starting rpc-server (worker)..."
-    {{ build_dir }}/bin/rpc-server --host 127.0.0.1 --port 50052 -d MTL0 --gguf {{ model }} &
+    {{ build_dir }}/bin/rpc-server --host 127.0.0.1 --port 50052 -d "$DEVICE" --gguf {{ model }} &
     WORKER_PID=$!
     sleep 3
     echo "Starting llama-server (orchestrator)..."
@@ -173,6 +197,10 @@ release-bundle version output="dist":
 # Create Linux CUDA release archive(s).
 release-bundle-cuda version output="dist":
     MESH_RELEASE_FLAVOR=cuda scripts/package-release.sh "{{ version }}" "{{ output }}"
+
+# Create Linux AMD ROCm release archive(s).
+release-bundle-amd version output="dist":
+    MESH_RELEASE_FLAVOR=rocm scripts/package-release.sh "{{ version }}" "{{ output }}"
 
 # Run the UI with Vite HMR and proxy /api to mesh-llm (default: http://127.0.0.1:3131)
 ui-dev api="http://127.0.0.1:3131" port="5173":

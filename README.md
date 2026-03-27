@@ -36,7 +36,7 @@ cd mesh-llm
 just build
 ```
 
-Requires: `just`, `cmake`, Rust toolchain, Node.js + npm. NVIDIA GPU builds need `nvcc` (CUDA toolkit). AMD GPU builds need ROCm/HIP. CPU-only and Jetson/Tegra also work. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+Requires: `just`, `cmake`, Rust toolchain, Node.js + npm. NVIDIA GPU builds need `nvcc` (CUDA toolkit). AMD GPU builds need ROCm/HIP. CPU-only and Jetson/Tegra also work. For source builds, `just build` auto-detects CUDA vs ROCm on Linux, or you can force `backend=rocm`. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## Run
 Once installed, you can run:
