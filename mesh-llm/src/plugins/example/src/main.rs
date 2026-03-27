@@ -1,21 +1,14 @@
 use anyhow::Result;
 use mesh_llm_plugin::{
-    accept_bulk_transfer_message, async_trait, bulk_transfer_sequence, cancel_task_result,
-    complete_result, empty_object_schema, get_prompt_result, get_task_payload_result,
-    get_task_result, json_reply_channel_message, json_schema_tool, json_string, list_tasks,
-    parse_optional_json, plugin_server_info_full, prompt, prompt_argument, proto,
-    read_resource_result, task, tool_with_schema, Plugin, PluginContext, PluginResult,
-    PluginRuntime, PromptRouter, ResourceRouter, SubscriptionSet, TaskStore, ToolCallRequest,
+    accept_bulk_transfer_message, bulk_transfer_sequence, cancel_task_result, complete_result,
+    empty_object_schema, get_prompt_result, get_task_payload_result, get_task_result,
+    json_reply_channel_message, json_schema_tool, json_string, list_tasks, parse_optional_json,
+    plugin_server_info_full, prompt, prompt_argument, proto, read_resource_result, task,
+    tool_with_schema, PluginRuntime, PromptRouter, ResourceRouter, SubscriptionSet, TaskStore,
     ToolRouter,
 };
 use rmcp::model::{
-    AnnotateAble, CallToolResult, CancelTaskParams, CancelTaskResult, CompleteRequestParams,
-    CompleteResult, GetPromptRequestParams, GetPromptResult, GetTaskInfoParams,
-    GetTaskPayloadResult, GetTaskResult, GetTaskResultParams, ListPromptsResult,
-    ListResourceTemplatesResult, ListResourcesResult, ListTasksResult, ListToolsResult,
-    LoggingLevel, PaginatedRequestParams, PromptMessage, PromptMessageRole,
-    ReadResourceRequestParams, ReadResourceResult, ServerInfo, SetLevelRequestParams,
-    SubscribeRequestParams, TaskStatus, UnsubscribeRequestParams,
+    AnnotateAble, LoggingLevel, PromptMessage, PromptMessageRole, ServerInfo, TaskStatus,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -343,10 +336,6 @@ impl ExampleState {
     }
 }
 
-struct ExamplePlugin {
-    state: Arc<Mutex<ExampleState>>,
-}
-
 impl Default for ExampleState {
     fn default() -> Self {
         let (bootstrap_task, bootstrap_payload) = example_task(
@@ -393,261 +382,163 @@ impl Default for ExampleState {
     }
 }
 
-#[async_trait]
-impl Plugin for ExamplePlugin {
-    fn plugin_id(&self) -> &str {
-        PLUGIN_ID
-    }
-
-    fn plugin_version(&self) -> String {
-        env!("CARGO_PKG_VERSION").into()
-    }
-
-    fn server_info(&self) -> ServerInfo {
-        server_info()
-    }
-
-    fn capabilities(&self) -> Vec<String> {
-        vec![
-            format!("channel:{EXAMPLE_CHANNEL}"),
-            "bulk:example".into(),
-            "mesh-events".into(),
-        ]
-    }
-
-    async fn health(&mut self, _context: &mut PluginContext<'_>) -> Result<String> {
-        let state = self.state.lock().await;
-        Ok(format!(
-            "peers={} messages={} bulk={} mesh_events={}",
-            state.known_peers.len(),
-            state.channel_messages.len(),
-            state.bulk_events.len(),
-            state.mesh_events.len()
-        ))
-    }
-
-    async fn list_tools(
-        &mut self,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<ListToolsResult>> {
-        Ok(Some(tool_router(self.state.clone()).list_tools_result()))
-    }
-
-    async fn call_tool(
-        &mut self,
-        request: ToolCallRequest,
-        context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<CallToolResult>> {
-        Ok(Some(
-            tool_router(self.state.clone())
-                .call(request, context)
-                .await?,
-        ))
-    }
-
-    async fn list_prompts(
-        &mut self,
-        _request: Option<PaginatedRequestParams>,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<ListPromptsResult>> {
-        Ok(Some(
-            prompt_router(self.state.clone()).list_prompts_result(),
-        ))
-    }
-
-    async fn get_prompt(
-        &mut self,
-        request: GetPromptRequestParams,
-        context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<GetPromptResult>> {
-        Ok(Some(
-            prompt_router(self.state.clone())
-                .get(request, context)
-                .await?,
-        ))
-    }
-
-    async fn list_resources(
-        &mut self,
-        _request: Option<PaginatedRequestParams>,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<ListResourcesResult>> {
-        Ok(Some(
-            resource_router(self.state.clone()).list_resources_result(),
-        ))
-    }
-
-    async fn read_resource(
-        &mut self,
-        request: ReadResourceRequestParams,
-        context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<ReadResourceResult>> {
-        Ok(Some(
-            resource_router(self.state.clone())
-                .read(request, context)
-                .await?,
-        ))
-    }
-
-    async fn list_resource_templates(
-        &mut self,
-        _request: Option<PaginatedRequestParams>,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<ListResourceTemplatesResult>> {
-        Ok(Some(
-            resource_router(self.state.clone()).list_resource_templates_result(),
-        ))
-    }
-
-    async fn subscribe_resource(
-        &mut self,
-        request: SubscribeRequestParams,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<()>> {
-        self.state.lock().await.subscriptions.subscribe(request.uri);
-        Ok(Some(()))
-    }
-
-    async fn unsubscribe_resource(
-        &mut self,
-        request: UnsubscribeRequestParams,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<()>> {
-        self.state
-            .lock()
-            .await
-            .subscriptions
-            .unsubscribe(&request.uri);
-        Ok(Some(()))
-    }
-
-    async fn complete(
-        &mut self,
-        request: CompleteRequestParams,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<CompleteResult>> {
-        Ok(Some(complete_example(request)?))
-    }
-
-    async fn set_log_level(
-        &mut self,
-        request: SetLevelRequestParams,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<()>> {
-        self.state.lock().await.log_level = request.level;
-        Ok(Some(()))
-    }
-
-    async fn list_tasks(
-        &mut self,
-        _request: Option<PaginatedRequestParams>,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<ListTasksResult>> {
-        let state = self.state.lock().await;
-        Ok(Some(list_tasks(state.tasks.list())))
-    }
-
-    async fn get_task_info(
-        &mut self,
-        request: GetTaskInfoParams,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<GetTaskResult>> {
-        let state = self.state.lock().await;
-        let task = state.tasks.get(&request.task_id)?;
-        Ok(Some(get_task_result(task.task.clone())))
-    }
-
-    async fn get_task_result(
-        &mut self,
-        request: GetTaskResultParams,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<GetTaskPayloadResult>> {
-        let state = self.state.lock().await;
-        let task = state.tasks.get(&request.task_id)?;
-        Ok(Some(get_task_payload_result(task.payload.clone())?))
-    }
-
-    async fn cancel_task(
-        &mut self,
-        request: CancelTaskParams,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<CancelTaskResult>> {
-        let mut state = self.state.lock().await;
-        let task = state.tasks.get_mut(&request.task_id)?;
-        task.task.status = TaskStatus::Cancelled;
-        task.task.status_message = Some("Cancelled by MCP client".into());
-        task.payload = json!({
-            "ok": false,
-            "cancelled": true,
-            "task_id": task.task.task_id,
-        });
-        Ok(Some(cancel_task_result(task.task.clone())))
-    }
-
-    async fn on_channel_message(
-        &mut self,
-        message: proto::ChannelMessage,
-        context: &mut PluginContext<'_>,
-    ) -> Result<()> {
-        let mut state = self.state.lock().await;
-        state.record_channel_message("inbound", &message);
-        if should_ack_channel(&message) {
-            let mut ack = json_reply_channel_message(
-                &message,
-                "example.ack",
-                &json!({
-                    "acknowledged_kind": message.message_kind,
-                    "received_bytes": message.body.len(),
-                    "received_by": state.local_peer_id,
-                }),
-            )?;
-            if ack.correlation_id.is_empty() {
-                ack.correlation_id = state.next_token("ack");
-            }
-            ack.metadata_json = json_string(&json!({
-                "reply_to": message.correlation_id,
-            }))?;
-            state.record_channel_message("outbound", &ack);
-            context.send_channel(ack).await?;
-        }
-        Ok(())
-    }
-
-    async fn on_bulk_transfer_message(
-        &mut self,
-        message: proto::BulkTransferMessage,
-        context: &mut PluginContext<'_>,
-    ) -> Result<()> {
-        let mut state = self.state.lock().await;
-        state.record_bulk_message("inbound", &message);
-        state.note_bulk_receive(&message);
-        if should_ack_bulk_offer(&message) {
-            let mut ack = accept_bulk_transfer_message(&message);
-            ack.metadata_json = json_string(&json!({
-                "accepted_by": state.local_peer_id,
-            }))?;
-            state.record_bulk_message("outbound", &ack);
-            context.send_bulk(ack).await?;
-        }
-        Ok(())
-    }
-
-    async fn on_mesh_event(
-        &mut self,
-        event: proto::MeshEvent,
-        _context: &mut PluginContext<'_>,
-    ) -> Result<()> {
-        self.state.lock().await.record_mesh_event(&event);
-        Ok(())
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    PluginRuntime::run(ExamplePlugin {
-        state: Arc::new(Mutex::new(ExampleState::default())),
+    let state = Arc::new(Mutex::new(ExampleState::default()));
+    PluginRuntime::run(build_example_plugin(state)).await
+}
+
+fn build_example_plugin(state: Arc<Mutex<ExampleState>>) -> mesh_llm_plugin::SimplePlugin {
+    let health_state = state.clone();
+    let subscribe_state = state.clone();
+    let unsubscribe_state = state.clone();
+    let set_log_level_state = state.clone();
+    let task_state = state.clone();
+    let task_info_state = state.clone();
+    let task_result_state = state.clone();
+    let cancel_task_state = state.clone();
+    let channel_state = state.clone();
+    let bulk_state = state.clone();
+    let mesh_event_state = state.clone();
+
+    mesh_llm_plugin::SimplePlugin::new(
+        mesh_llm_plugin::PluginMetadata::new(PLUGIN_ID, env!("CARGO_PKG_VERSION"), server_info())
+            .with_capabilities(vec![
+                format!("channel:{EXAMPLE_CHANNEL}"),
+                "bulk:example".into(),
+                "mesh-events".into(),
+            ]),
+    )
+    .with_tool_router(tool_router(state.clone()))
+    .with_prompt_router(prompt_router(state.clone()))
+    .with_resource_router(resource_router(state.clone()))
+    .with_completion_router(completion_router())
+    .with_task_router(
+        mesh_llm_plugin::TaskRouter::new()
+            .with_list(move |_request, _context| {
+                let state = task_state.clone();
+                Box::pin(async move {
+                    let state = state.lock().await;
+                    Ok(list_tasks(state.tasks.list()))
+                })
+            })
+            .with_get_info(move |request, _context| {
+                let state = task_info_state.clone();
+                Box::pin(async move {
+                    let state = state.lock().await;
+                    let task = state.tasks.get(&request.task_id)?;
+                    Ok(get_task_result(task.task.clone()))
+                })
+            })
+            .with_get_result(move |request, _context| {
+                let state = task_result_state.clone();
+                Box::pin(async move {
+                    let state = state.lock().await;
+                    let task = state.tasks.get(&request.task_id)?;
+                    get_task_payload_result(task.payload.clone())
+                })
+            })
+            .with_cancel(move |request, _context| {
+                let state = cancel_task_state.clone();
+                Box::pin(async move {
+                    let mut state = state.lock().await;
+                    let task = state.tasks.get_mut(&request.task_id)?;
+                    task.task.status = TaskStatus::Cancelled;
+                    task.task.status_message = Some("Cancelled by MCP client".into());
+                    task.payload = json!({
+                        "ok": false,
+                        "cancelled": true,
+                        "task_id": task.task.task_id,
+                    });
+                    Ok(cancel_task_result(task.task.clone()))
+                })
+            }),
+    )
+    .with_health(move |_context| {
+        let state = health_state.clone();
+        Box::pin(async move {
+            let state = state.lock().await;
+            Ok(format!(
+                "peers={} messages={} bulk={} mesh_events={}",
+                state.known_peers.len(),
+                state.channel_messages.len(),
+                state.bulk_events.len(),
+                state.mesh_events.len()
+            ))
+        })
     })
-    .await
+    .with_subscribe_resource(move |request, _context| {
+        let state = subscribe_state.clone();
+        Box::pin(async move {
+            state.lock().await.subscriptions.subscribe(request.uri);
+            Ok(())
+        })
+    })
+    .with_unsubscribe_resource(move |request, _context| {
+        let state = unsubscribe_state.clone();
+        Box::pin(async move {
+            state.lock().await.subscriptions.unsubscribe(&request.uri);
+            Ok(())
+        })
+    })
+    .with_set_log_level(move |request, _context| {
+        let state = set_log_level_state.clone();
+        Box::pin(async move {
+            state.lock().await.log_level = request.level;
+            Ok(())
+        })
+    })
+    .on_channel_message(move |message, context| {
+        let state = channel_state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().await;
+            state.record_channel_message("inbound", &message);
+            if should_ack_channel(&message) {
+                let mut ack = json_reply_channel_message(
+                    &message,
+                    "example.ack",
+                    &json!({
+                        "acknowledged_kind": message.message_kind,
+                        "received_bytes": message.body.len(),
+                        "received_by": state.local_peer_id,
+                    }),
+                )?;
+                if ack.correlation_id.is_empty() {
+                    ack.correlation_id = state.next_token("ack");
+                }
+                ack.metadata_json = json_string(&json!({
+                    "reply_to": message.correlation_id,
+                }))?;
+                state.record_channel_message("outbound", &ack);
+                context.send_channel(ack).await?;
+            }
+            Ok(())
+        })
+    })
+    .on_bulk_transfer_message(move |message, context| {
+        let state = bulk_state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().await;
+            state.record_bulk_message("inbound", &message);
+            state.note_bulk_receive(&message);
+            if should_ack_bulk_offer(&message) {
+                let mut ack = accept_bulk_transfer_message(&message);
+                ack.metadata_json = json_string(&json!({
+                    "accepted_by": state.local_peer_id,
+                }))?;
+                state.record_bulk_message("outbound", &ack);
+                context.send_bulk(ack).await?;
+            }
+            Ok(())
+        })
+    })
+    .on_mesh_event(move |event, _context| {
+        let state = mesh_event_state.clone();
+        Box::pin(async move {
+            state.lock().await.record_mesh_event(&event);
+            Ok(())
+        })
+    })
 }
 
 fn tool_router(state: Arc<Mutex<ExampleState>>) -> ToolRouter {
@@ -940,29 +831,31 @@ fn resource_router(state: Arc<Mutex<ExampleState>>) -> ResourceRouter {
     router
 }
 
-fn complete_example(request: CompleteRequestParams) -> PluginResult<CompleteResult> {
-    let values = if let Some(prompt_name) = request.r#ref.as_prompt_name() {
-        match (prompt_name, request.argument.name.as_str()) {
-            ("status_brief", "topic") => vec![
-                "mesh health".into(),
-                "plugin runtime".into(),
-                "bulk transfers".into(),
-            ],
-            ("status_brief", "audience") => {
-                vec!["operators".into(), "developers".into(), "testers".into()]
-            }
-            ("peer_focus", "peer_id") => vec!["peer-alpha".into(), "peer-beta".into()],
-            _ => vec![request.argument.value],
-        }
-    } else if let Some(resource_uri) = request.r#ref.as_resource_uri() {
-        match resource_uri {
-            "example://peer/{peer_id}" => vec!["peer-alpha".into(), "peer-beta".into()],
-            _ => vec![request.argument.value],
-        }
-    } else {
-        vec![request.argument.value]
-    };
-    complete_result(values)
+fn completion_router() -> mesh_llm_plugin::CompletionRouter {
+    let mut router = mesh_llm_plugin::CompletionRouter::new();
+    router.add_prompt_argument_values(
+        "status_brief",
+        "topic",
+        vec![
+            "mesh health".into(),
+            "plugin runtime".into(),
+            "bulk transfers".into(),
+        ],
+    );
+    router.add_prompt_argument_values(
+        "status_brief",
+        "audience",
+        vec!["operators".into(), "developers".into(), "testers".into()],
+    );
+    router.add_prompt_argument_values(
+        "peer_focus",
+        "peer_id",
+        vec!["peer-alpha".into(), "peer-beta".into()],
+    );
+    router.add_resource("example://peer/{peer_id}", move |_request, _context| {
+        Box::pin(async move { complete_result(vec!["peer-alpha".into(), "peer-beta".into()]) })
+    });
+    router
 }
 
 fn example_task(

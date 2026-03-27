@@ -7,10 +7,9 @@ pub mod mcp;
 
 use anyhow::Result;
 use mesh_llm_plugin::{
-    async_trait, json_schema_tool, plugin_server_info, proto, MeshVisibility, Plugin,
-    PluginContext, PluginResult, PluginRuntime, ToolCallRequest, ToolRouter,
+    json_schema_tool, plugin_server_info, MeshVisibility, PluginMetadata, PluginRuntime,
+    SimplePlugin, ToolRouter,
 };
-use rmcp::model::{CallToolResult, ListToolsResult, ServerInfo};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -299,21 +298,7 @@ impl BlackboardStore {
 }
 
 pub(crate) async fn run_plugin(name: String) -> anyhow::Result<()> {
-    PluginRuntime::run(BlackboardPlugin::new(name)).await
-}
-
-struct BlackboardPlugin {
-    name: String,
-    store: BlackboardStore,
-}
-
-impl BlackboardPlugin {
-    fn new(name: String) -> Self {
-        Self {
-            name,
-            store: BlackboardStore::new(true),
-        }
-    }
+    PluginRuntime::run(build_blackboard_plugin(name)).await
 }
 
 fn tool_router(store: BlackboardStore) -> ToolRouter {
@@ -382,126 +367,105 @@ fn tool_router(store: BlackboardStore) -> ToolRouter {
     router
 }
 
-#[async_trait]
-impl Plugin for BlackboardPlugin {
-    fn plugin_id(&self) -> &str {
-        &self.name
-    }
+fn build_blackboard_plugin(name: String) -> SimplePlugin {
+    let store = BlackboardStore::new(true);
+    let health_store = store.clone();
+    let sync_store = store.clone();
+    let channel_store = store.clone();
 
-    fn plugin_version(&self) -> String {
-        crate::VERSION.to_string()
-    }
-
-    fn server_info(&self) -> ServerInfo {
-        plugin_server_info(
-            "mesh-blackboard",
+    SimplePlugin::new(
+        PluginMetadata::new(
+            name,
             crate::VERSION,
-            "Mesh Blackboard Plugin",
-            "Shared blackboard across the mesh for status, questions, findings, and tips.",
-            Some(
-                "Use blackboard.feed to inspect the recent feed, blackboard.search to find relevant posts, and blackboard.post to share findings.",
+            plugin_server_info(
+                "mesh-blackboard",
+                crate::VERSION,
+                "Mesh Blackboard Plugin",
+                "Shared blackboard across the mesh for status, questions, findings, and tips.",
+                Some(
+                    "Use blackboard.feed to inspect the recent feed, blackboard.search to find relevant posts, and blackboard.post to share findings.",
+                ),
             ),
         )
-    }
-
-    fn capabilities(&self) -> Vec<String> {
-        vec!["channel:blackboard".into()]
-    }
-
-    async fn on_initialized(&mut self, context: &mut PluginContext<'_>) -> Result<()> {
-        context
-            .send_json_channel(
-                BLACKBOARD_CHANNEL,
-                String::new(),
-                "blackboard",
-                &BlackboardMessage::SyncRequest,
-            )
-            .await
-    }
-
-    async fn health(&mut self, _context: &mut PluginContext<'_>) -> Result<String> {
-        Ok(format!("items={}", self.store.all().await.len()))
-    }
-
-    async fn list_tools(
-        &mut self,
-        _context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<ListToolsResult>> {
-        Ok(Some(tool_router(self.store.clone()).list_tools_result()))
-    }
-
-    async fn call_tool(
-        &mut self,
-        request: ToolCallRequest,
-        context: &mut PluginContext<'_>,
-    ) -> PluginResult<Option<CallToolResult>> {
-        Ok(Some(
-            tool_router(self.store.clone())
-                .call(request, context)
-                .await?,
-        ))
-    }
-
-    async fn on_channel_message(
-        &mut self,
-        message: proto::ChannelMessage,
-        context: &mut PluginContext<'_>,
-    ) -> Result<()> {
-        if message.channel != BLACKBOARD_CHANNEL {
-            return Ok(());
-        }
-
-        let payload: BlackboardMessage = serde_json::from_slice(&message.body)?;
-        match payload {
-            BlackboardMessage::Post(item) => {
-                let _ = self.store.insert(item).await;
+        .with_capabilities(vec!["channel:blackboard".into()]),
+    )
+    .with_tool_router(tool_router(store))
+    .with_health(move |_context| {
+        let store = health_store.clone();
+        Box::pin(async move { Ok(format!("items={}", store.all().await.len())) })
+    })
+    .on_initialized(move |context| {
+        Box::pin(async move {
+            context
+                .send_json_channel(
+                    BLACKBOARD_CHANNEL,
+                    String::new(),
+                    "blackboard",
+                    &BlackboardMessage::SyncRequest,
+                )
+                .await
+        })
+    })
+    .on_channel_message(move |message, context| {
+        let store = channel_store.clone();
+        let sync_store = sync_store.clone();
+        Box::pin(async move {
+            if message.channel != BLACKBOARD_CHANNEL {
+                return Ok(());
             }
-            BlackboardMessage::SyncRequest => {
-                let ids = self.store.ids().await;
-                context
-                    .send_json_channel(
-                        BLACKBOARD_CHANNEL,
-                        message.source_peer_id,
-                        "blackboard",
-                        &BlackboardMessage::SyncDigest(ids),
-                    )
-                    .await?;
-            }
-            BlackboardMessage::SyncDigest(ids) => {
-                let our_ids = self.store.ids().await;
-                let missing: Vec<u64> =
-                    ids.into_iter().filter(|id| !our_ids.contains(id)).collect();
-                if !missing.is_empty() {
+
+            let payload: BlackboardMessage = serde_json::from_slice(&message.body)?;
+            match payload {
+                BlackboardMessage::Post(item) => {
+                    let _ = store.insert(item).await;
+                }
+                BlackboardMessage::SyncRequest => {
+                    let ids = sync_store.ids().await;
                     context
                         .send_json_channel(
                             BLACKBOARD_CHANNEL,
                             message.source_peer_id,
                             "blackboard",
-                            &BlackboardMessage::FetchRequest(missing),
+                            &BlackboardMessage::SyncDigest(ids),
                         )
                         .await?;
                 }
-            }
-            BlackboardMessage::FetchRequest(ids) => {
-                let items = self.store.get_by_ids(&ids).await;
-                context
-                    .send_json_channel(
-                        BLACKBOARD_CHANNEL,
-                        message.source_peer_id,
-                        "blackboard",
-                        &BlackboardMessage::FetchResponse(items),
-                    )
-                    .await?;
-            }
-            BlackboardMessage::FetchResponse(items) => {
-                for item in items {
-                    let _ = self.store.insert(item).await;
+                BlackboardMessage::SyncDigest(ids) => {
+                    let our_ids = sync_store.ids().await;
+                    let missing: Vec<u64> =
+                        ids.into_iter().filter(|id| !our_ids.contains(id)).collect();
+                    if !missing.is_empty() {
+                        context
+                            .send_json_channel(
+                                BLACKBOARD_CHANNEL,
+                                message.source_peer_id,
+                                "blackboard",
+                                &BlackboardMessage::FetchRequest(missing),
+                            )
+                            .await?;
+                    }
+                }
+                BlackboardMessage::FetchRequest(ids) => {
+                    let items = sync_store.get_by_ids(&ids).await;
+                    context
+                        .send_json_channel(
+                            BLACKBOARD_CHANNEL,
+                            message.source_peer_id,
+                            "blackboard",
+                            &BlackboardMessage::FetchResponse(items),
+                        )
+                        .await?;
+                }
+                BlackboardMessage::FetchResponse(items) => {
+                    for item in items {
+                        let _ = store.insert(item).await;
+                    }
                 }
             }
-        }
 
-        Ok(())
-    }
+            Ok(())
+        })
+    })
 }
 // ── PII filter ──
 

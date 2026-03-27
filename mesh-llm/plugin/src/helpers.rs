@@ -1,9 +1,10 @@
 use rmcp::model::{AnnotateAble, RawResource, RawResourceTemplate};
 use rmcp::model::{
-    CallToolResult, CancelTaskResult, CompleteResult, CompletionInfo, Content,
-    GetPromptRequestParams, GetPromptResult, GetTaskPayloadResult, GetTaskResult, Implementation,
-    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, ListTasksResult,
-    ListToolsResult, Prompt, PromptArgument, ReadResourceRequestParams, ReadResourceResult,
+    CallToolResult, CancelTaskParams, CancelTaskResult, CompleteRequestParams, CompleteResult,
+    CompletionInfo, Content, GetPromptRequestParams, GetPromptResult, GetTaskInfoParams,
+    GetTaskPayloadResult, GetTaskResult, GetTaskResultParams, Implementation, ListPromptsResult,
+    ListResourceTemplatesResult, ListResourcesResult, ListTasksResult, ListToolsResult,
+    PaginatedRequestParams, Prompt, PromptArgument, ReadResourceRequestParams, ReadResourceResult,
     Resource, ResourceContents, ResourceTemplate, ServerCapabilities, ServerInfo, Task, TaskStatus,
     Tool,
 };
@@ -490,6 +491,16 @@ pub type PromptFuture<'a> =
     Pin<Box<dyn Future<Output = PluginResult<GetPromptResult>> + Send + 'a>>;
 pub type ResourceFuture<'a> =
     Pin<Box<dyn Future<Output = PluginResult<ReadResourceResult>> + Send + 'a>>;
+pub type CompletionFuture<'a> =
+    Pin<Box<dyn Future<Output = PluginResult<CompleteResult>> + Send + 'a>>;
+pub type TaskListFuture<'a> =
+    Pin<Box<dyn Future<Output = PluginResult<ListTasksResult>> + Send + 'a>>;
+pub type TaskInfoFuture<'a> =
+    Pin<Box<dyn Future<Output = PluginResult<GetTaskResult>> + Send + 'a>>;
+pub type TaskResultFuture<'a> =
+    Pin<Box<dyn Future<Output = PluginResult<GetTaskPayloadResult>> + Send + 'a>>;
+pub type TaskCancelFuture<'a> =
+    Pin<Box<dyn Future<Output = PluginResult<CancelTaskResult>> + Send + 'a>>;
 
 type ToolHandler = Arc<
     dyn for<'a, 'ctx> Fn(ToolCallRequest, &'a mut PluginContext<'ctx>) -> ToolFuture<'a>
@@ -749,6 +760,335 @@ impl ResourceRouter {
 }
 
 impl Default for ResourceRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+enum CompletionMatcher {
+    PromptArgument {
+        prompt_name: String,
+        argument_name: Option<String>,
+    },
+    ResourceArgument {
+        resource_uri: String,
+        argument_name: Option<String>,
+    },
+}
+
+impl CompletionMatcher {
+    fn matches(&self, request: &CompleteRequestParams) -> bool {
+        match self {
+            Self::PromptArgument {
+                prompt_name,
+                argument_name,
+            } => {
+                request.r#ref.as_prompt_name() == Some(prompt_name.as_str())
+                    && argument_name
+                        .as_ref()
+                        .map(|name| request.argument.name == *name)
+                        .unwrap_or(true)
+            }
+            Self::ResourceArgument {
+                resource_uri,
+                argument_name,
+            } => {
+                request.r#ref.as_resource_uri() == Some(resource_uri.as_str())
+                    && argument_name
+                        .as_ref()
+                        .map(|name| request.argument.name == *name)
+                        .unwrap_or(true)
+            }
+        }
+    }
+}
+
+type CompletionHandler = Arc<
+    dyn for<'a, 'ctx> Fn(CompleteRequestParams, &'a mut PluginContext<'ctx>) -> CompletionFuture<'a>
+        + Send
+        + Sync,
+>;
+
+pub struct CompletionRouter {
+    handlers: Vec<(CompletionMatcher, CompletionHandler)>,
+}
+
+impl CompletionRouter {
+    pub fn new() -> Self {
+        Self {
+            handlers: Vec::new(),
+        }
+    }
+
+    pub fn add_prompt_argument_values(
+        &mut self,
+        prompt_name: impl Into<String>,
+        argument_name: impl Into<String>,
+        values: Vec<String>,
+    ) {
+        let values = Arc::new(values);
+        self.add_prompt_argument(prompt_name, argument_name, move |_request, _context| {
+            let values = values.clone();
+            Box::pin(async move { complete_result(values.as_ref().clone()) })
+        });
+    }
+
+    pub fn add_resource_argument_values(
+        &mut self,
+        resource_uri: impl Into<String>,
+        argument_name: impl Into<String>,
+        values: Vec<String>,
+    ) {
+        let values = Arc::new(values);
+        self.add_resource_argument(resource_uri, argument_name, move |_request, _context| {
+            let values = values.clone();
+            Box::pin(async move { complete_result(values.as_ref().clone()) })
+        });
+    }
+
+    pub fn add_prompt_argument<F>(
+        &mut self,
+        prompt_name: impl Into<String>,
+        argument_name: impl Into<String>,
+        handler: F,
+    ) where
+        F: for<'a, 'ctx> Fn(
+                CompleteRequestParams,
+                &'a mut PluginContext<'ctx>,
+            ) -> CompletionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.handlers.push((
+            CompletionMatcher::PromptArgument {
+                prompt_name: prompt_name.into(),
+                argument_name: Some(argument_name.into()),
+            },
+            Arc::new(handler),
+        ));
+    }
+
+    pub fn add_prompt<F>(&mut self, prompt_name: impl Into<String>, handler: F)
+    where
+        F: for<'a, 'ctx> Fn(
+                CompleteRequestParams,
+                &'a mut PluginContext<'ctx>,
+            ) -> CompletionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.handlers.push((
+            CompletionMatcher::PromptArgument {
+                prompt_name: prompt_name.into(),
+                argument_name: None,
+            },
+            Arc::new(handler),
+        ));
+    }
+
+    pub fn add_resource_argument<F>(
+        &mut self,
+        resource_uri: impl Into<String>,
+        argument_name: impl Into<String>,
+        handler: F,
+    ) where
+        F: for<'a, 'ctx> Fn(
+                CompleteRequestParams,
+                &'a mut PluginContext<'ctx>,
+            ) -> CompletionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.handlers.push((
+            CompletionMatcher::ResourceArgument {
+                resource_uri: resource_uri.into(),
+                argument_name: Some(argument_name.into()),
+            },
+            Arc::new(handler),
+        ));
+    }
+
+    pub fn add_resource<F>(&mut self, resource_uri: impl Into<String>, handler: F)
+    where
+        F: for<'a, 'ctx> Fn(
+                CompleteRequestParams,
+                &'a mut PluginContext<'ctx>,
+            ) -> CompletionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.handlers.push((
+            CompletionMatcher::ResourceArgument {
+                resource_uri: resource_uri.into(),
+                argument_name: None,
+            },
+            Arc::new(handler),
+        ));
+    }
+
+    pub async fn complete(
+        &self,
+        request: CompleteRequestParams,
+        context: &mut PluginContext<'_>,
+    ) -> PluginResult<CompleteResult> {
+        let Some((_, handler)) = self
+            .handlers
+            .iter()
+            .find(|(matcher, _)| matcher.matches(&request))
+        else {
+            return complete_result(vec![request.argument.value]);
+        };
+        handler(request, context).await
+    }
+}
+
+impl Default for CompletionRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+type TaskListHandler = Arc<
+    dyn for<'a, 'ctx> Fn(
+            Option<PaginatedRequestParams>,
+            &'a mut PluginContext<'ctx>,
+        ) -> TaskListFuture<'a>
+        + Send
+        + Sync,
+>;
+type TaskInfoHandler = Arc<
+    dyn for<'a, 'ctx> Fn(GetTaskInfoParams, &'a mut PluginContext<'ctx>) -> TaskInfoFuture<'a>
+        + Send
+        + Sync,
+>;
+type TaskResultHandler = Arc<
+    dyn for<'a, 'ctx> Fn(GetTaskResultParams, &'a mut PluginContext<'ctx>) -> TaskResultFuture<'a>
+        + Send
+        + Sync,
+>;
+type TaskCancelHandler = Arc<
+    dyn for<'a, 'ctx> Fn(CancelTaskParams, &'a mut PluginContext<'ctx>) -> TaskCancelFuture<'a>
+        + Send
+        + Sync,
+>;
+
+pub struct TaskRouter {
+    list_handler: Option<TaskListHandler>,
+    info_handler: Option<TaskInfoHandler>,
+    result_handler: Option<TaskResultHandler>,
+    cancel_handler: Option<TaskCancelHandler>,
+}
+
+impl TaskRouter {
+    pub fn new() -> Self {
+        Self {
+            list_handler: None,
+            info_handler: None,
+            result_handler: None,
+            cancel_handler: None,
+        }
+    }
+
+    pub fn with_list<F>(mut self, handler: F) -> Self
+    where
+        F: for<'a, 'ctx> Fn(
+                Option<PaginatedRequestParams>,
+                &'a mut PluginContext<'ctx>,
+            ) -> TaskListFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.list_handler = Some(Arc::new(handler));
+        self
+    }
+
+    pub fn with_get_info<F>(mut self, handler: F) -> Self
+    where
+        F: for<'a, 'ctx> Fn(GetTaskInfoParams, &'a mut PluginContext<'ctx>) -> TaskInfoFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.info_handler = Some(Arc::new(handler));
+        self
+    }
+
+    pub fn with_get_result<F>(mut self, handler: F) -> Self
+    where
+        F: for<'a, 'ctx> Fn(
+                GetTaskResultParams,
+                &'a mut PluginContext<'ctx>,
+            ) -> TaskResultFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.result_handler = Some(Arc::new(handler));
+        self
+    }
+
+    pub fn with_cancel<F>(mut self, handler: F) -> Self
+    where
+        F: for<'a, 'ctx> Fn(CancelTaskParams, &'a mut PluginContext<'ctx>) -> TaskCancelFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.cancel_handler = Some(Arc::new(handler));
+        self
+    }
+
+    pub async fn list_tasks(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: &mut PluginContext<'_>,
+    ) -> PluginResult<Option<ListTasksResult>> {
+        match &self.list_handler {
+            Some(handler) => Ok(Some(handler(request, context).await?)),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn get_task_info(
+        &self,
+        request: GetTaskInfoParams,
+        context: &mut PluginContext<'_>,
+    ) -> PluginResult<Option<GetTaskResult>> {
+        match &self.info_handler {
+            Some(handler) => Ok(Some(handler(request, context).await?)),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn get_task_result(
+        &self,
+        request: GetTaskResultParams,
+        context: &mut PluginContext<'_>,
+    ) -> PluginResult<Option<GetTaskPayloadResult>> {
+        match &self.result_handler {
+            Some(handler) => Ok(Some(handler(request, context).await?)),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn cancel_task(
+        &self,
+        request: CancelTaskParams,
+        context: &mut PluginContext<'_>,
+    ) -> PluginResult<Option<CancelTaskResult>> {
+        match &self.cancel_handler {
+            Some(handler) => Ok(Some(handler(request, context).await?)),
+            None => Ok(None),
+        }
+    }
+}
+
+impl Default for TaskRouter {
     fn default() -> Self {
         Self::new()
     }
