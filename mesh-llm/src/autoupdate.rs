@@ -460,6 +460,8 @@ mod tests {
 
     #[test]
     fn test_latest_release_asset_url() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(SELF_UPDATE_REPO_ENV);
         assert_eq!(
             latest_release_asset_url("mesh-llm-aarch64-apple-darwin.tar.gz"),
             "https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-llm-aarch64-apple-darwin.tar.gz"
