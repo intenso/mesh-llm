@@ -16,6 +16,8 @@ curl -fsSL https://raw.githubusercontent.com/michaelneale/mesh-llm/main/install.
 
 The installer probes your machine, recommends a flavor, and asks what you want to install.
 
+If you want it to run as a per-user background service, see [Background service](#background-service).
+
 For non-interactive installs, set the flavor explicitly:
 
 ```bash
@@ -146,6 +148,50 @@ Different nodes serve different models. The API proxy routes by the `model` fiel
 mesh-llm                                   # no args — shows instructions + console
 ```
 Opens a read-only console on `:3131`. Use the CLI to start or join a mesh.
+
+## Background service
+
+To install it as a per-user background service:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michaelneale/mesh-llm/main/install.sh | bash -s -- --service
+```
+
+To seed the service with a custom startup command on first install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michaelneale/mesh-llm/main/install.sh | bash -s -- --service --service-args '--model Qwen2.5-3B'
+```
+
+Service installs are user-scoped:
+
+- macOS installs a `launchd` agent at `~/Library/LaunchAgents/com.mesh-llm.mesh-llm.plist`
+- Linux installs a `systemd --user` unit at `~/.config/systemd/user/mesh-llm.service`
+- Shared environment config lives in `~/.config/mesh-llm/service.env`
+
+The two platforms handle launch args differently:
+
+- macOS: `launchd` runs `~/.config/mesh-llm/run-service.sh`, which reads `~/.config/mesh-llm/service.args`. `service.args` is one `mesh-llm` CLI argument per line. The installer creates it with `--auto` by default and preserves your edits on reinstall unless you pass `--service-args` again.
+- Linux: the installer writes the `mesh-llm` argv directly into `ExecStart=` in `~/.config/systemd/user/mesh-llm.service`. If you pass `--service-args`, those replace the current unit args; otherwise the installer preserves the existing unit args on reinstall.
+
+`service.env` is optional and shared by both platforms. Use plain `KEY=value` lines, for example:
+
+```text
+MESH_LLM_NO_SELF_UPDATE=1
+```
+
+If you edit the Linux unit manually, reload and restart it:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart mesh-llm.service
+```
+
+On Linux this is a user service, so if you want it to keep running after reboot before login, enable lingering once:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
 
 ## Web console
 
