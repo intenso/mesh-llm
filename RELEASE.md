@@ -55,14 +55,13 @@ mkdir /tmp/test-bundle && tar xzf /tmp/mesh-bundle.tar.gz -C /tmp/test-bundle --
 rm -rf /tmp/test-bundle
 ```
 
-### 5. Commit, tag, push
+### 5. Release
 
 ```bash
-just release-version v0.X.0
-git add -A && git commit -m "v0.X.0: <summary>"
-git tag v0.X.0
-git push origin main --tags
+just release v0.X.0
 ```
+
+Run this from a clean local `main` branch. It bumps the version in source + Cargo manifests, refreshes `Cargo.lock` without upgrading dependencies, commits as `v0.X.0: release`, pushes `main`, and then pushes only the new release tag.
 
 ### 6. Let GitHub Actions build and publish the release
 
