@@ -4648,7 +4648,7 @@ function ModelSidebar({
             title="Mesh VRAM"
             value={`${(model.mesh_vram_gb ?? 0).toFixed(1)} GB`}
             icon={<MemoryStick className="h-4 w-4" />}
-            tooltip="VRAM allocated to warm instances of this model."
+            tooltip="Total available VRAM across nodes serving this model."
           />
           <ModelFactCard
             title="File size"
