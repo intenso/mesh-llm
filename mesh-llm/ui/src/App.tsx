@@ -4578,8 +4578,20 @@ function ModelSidebar({
                   {shortName(model.name)}
                 </SheetTitle>
                 <StatusPill
-                  label={model.status === 'warm' ? 'Warm' : 'Cold'}
-                  tone={model.status === 'warm' ? 'warm' : 'cold'}
+                  label={
+                    model.status === "warm"
+                      ? "Warm"
+                      : model.status === "cold"
+                        ? "Cold"
+                        : model.status || "Unknown"
+                  }
+                  tone={
+                    model.status === "warm"
+                      ? "warm"
+                      : model.status === "cold"
+                        ? "cold"
+                        : "neutral"
+                  }
                   dot
                   tooltip={modelStatusTooltip(model.status)}
                 />
