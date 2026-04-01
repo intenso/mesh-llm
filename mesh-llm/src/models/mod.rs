@@ -1,6 +1,7 @@
 pub mod capabilities;
 pub mod catalog;
 pub mod cli;
+pub mod inventory;
 pub mod local;
 pub mod topology;
 
@@ -18,6 +19,9 @@ pub use capabilities::{CapabilityLevel, ModelCapabilities};
 pub use cli::{
     print_legacy_storage_warning, run_model_download, run_model_installed, run_model_recommended,
     run_model_search, run_model_show, warn_about_legacy_model_usage,
+};
+pub use inventory::{
+    scan_all_model_metadata, scan_local_inventory_snapshot, scan_local_model_sizes,
 };
 pub use local::{
     exact_model_source_for_path, find_model_path, huggingface_hub_cache, huggingface_hub_cache_dir,

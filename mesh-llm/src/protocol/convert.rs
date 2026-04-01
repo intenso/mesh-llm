@@ -103,6 +103,14 @@ fn legacy_descriptor_from_identity(
     }
 }
 
+pub(crate) fn sanitize_gossip_announcement_for_wire(ann: &PeerAnnouncement) -> PeerAnnouncement {
+    let mut sanitized = ann.clone();
+    sanitized.available_models.clear();
+    sanitized.available_model_metadata.clear();
+    sanitized.available_model_sizes.clear();
+    sanitized
+}
+
 pub(crate) fn local_role_to_proto(role: &NodeRole) -> (i32, Option<u32>) {
     match role {
         NodeRole::Worker => (crate::proto::node::NodeRole::Worker as i32, None),
@@ -127,6 +135,7 @@ pub(crate) fn proto_role_to_local(role_int: i32, http_port: Option<u32>) -> Node
 pub(crate) fn local_ann_to_proto_ann(
     ann: &PeerAnnouncement,
 ) -> crate::proto::node::PeerAnnouncement {
+    let ann = sanitize_gossip_announcement_for_wire(ann);
     let (role_int, http_port) = local_role_to_proto(&ann.role);
     let serialized_addr = serde_json::to_vec(&ann.addr).unwrap_or_default();
     let demand: Vec<crate::proto::node::ModelDemandEntry> = ann
@@ -145,39 +154,8 @@ pub(crate) fn local_ann_to_proto_ann(
         .iter()
         .map(|descriptor| descriptor_identity_to_proto(&descriptor.identity))
         .collect();
-    let available_model_identities = ann
-        .available_model_descriptors
-        .iter()
-        .map(|descriptor| descriptor_identity_to_proto(&descriptor.identity))
-        .collect();
     let served_model_descriptors = ann
         .served_model_descriptors
-        .iter()
-        .map(|descriptor| crate::proto::node::ServedModelDescriptor {
-            identity: Some(descriptor_identity_to_proto(&descriptor.identity)),
-            capabilities: Some(crate::proto::node::ModelCapabilities {
-                vision: local_capability_level_to_proto(descriptor.capabilities.vision),
-                reasoning: local_capability_level_to_proto(descriptor.capabilities.reasoning),
-                tool_use: local_capability_level_to_proto(descriptor.capabilities.tool_use),
-                moe: descriptor.capabilities.moe,
-            }),
-            topology: descriptor.topology.as_ref().map(|topology| {
-                crate::proto::node::ModelTopology {
-                    moe: topology
-                        .moe
-                        .as_ref()
-                        .map(|moe| crate::proto::node::ModelMoeInfo {
-                            expert_count: moe.expert_count,
-                            used_expert_count: moe.used_expert_count,
-                            min_experts_per_node: moe.min_experts_per_node,
-                            source: moe.source.clone(),
-                        }),
-                }
-            }),
-        })
-        .collect();
-    let available_model_descriptors = ann
-        .available_model_descriptors
         .iter()
         .map(|descriptor| crate::proto::node::ServedModelDescriptor {
             identity: Some(descriptor_identity_to_proto(&descriptor.identity)),
@@ -226,9 +204,7 @@ pub(crate) fn local_ann_to_proto_ann(
         available_model_sizes: ann.available_model_sizes.clone(),
         serialized_addr,
         served_model_identities,
-        available_model_identities,
         served_model_descriptors,
-        available_model_descriptors,
     }
 }
 
@@ -284,7 +260,7 @@ pub(crate) fn proto_ann_to_local(
         model_source: pa.model_source.clone(),
         serving: pa.primary_serving.clone(),
         serving_models: pa.serving_models.clone(),
-        available_models: pa.available_models.clone(),
+        available_models: Vec::new(),
         requested_models: pa.requested_models.clone(),
         version: pa.version.clone(),
         model_demand,
@@ -294,9 +270,9 @@ pub(crate) fn proto_ann_to_local(
         is_soc: pa.is_soc,
         gpu_vram: pa.gpu_vram.clone(),
         gpu_bandwidth_gbps: None,
-        available_model_metadata: pa.available_model_metadata.clone(),
+        available_model_metadata: Vec::new(),
         experts_summary: pa.experts_summary.clone(),
-        available_model_sizes: pa.available_model_sizes.clone(),
+        available_model_sizes: HashMap::new(),
         served_model_descriptors: if !pa.served_model_descriptors.is_empty() {
             pa.served_model_descriptors
                 .iter()
@@ -333,46 +309,6 @@ pub(crate) fn proto_ann_to_local(
                 .collect()
         } else {
             pa.served_model_identities
-                .iter()
-                .map(legacy_descriptor_from_identity)
-                .collect()
-        },
-        available_model_descriptors: if !pa.available_model_descriptors.is_empty() {
-            pa.available_model_descriptors
-                .iter()
-                .map(|descriptor| crate::mesh::ServedModelDescriptor {
-                    identity: descriptor
-                        .identity
-                        .as_ref()
-                        .map(proto_identity_to_local)
-                        .unwrap_or_default(),
-                    capabilities: descriptor
-                        .capabilities
-                        .as_ref()
-                        .map(|caps| crate::models::ModelCapabilities {
-                            vision: proto_capability_level_to_local(caps.vision),
-                            reasoning: proto_capability_level_to_local(caps.reasoning),
-                            tool_use: proto_capability_level_to_local(caps.tool_use),
-                            moe: caps.moe,
-                        })
-                        .unwrap_or_default(),
-                    topology: descriptor.topology.as_ref().map(|topology| {
-                        crate::models::ModelTopology {
-                            moe: topology
-                                .moe
-                                .as_ref()
-                                .map(|moe| crate::models::ModelMoeInfo {
-                                    expert_count: moe.expert_count,
-                                    used_expert_count: moe.used_expert_count,
-                                    min_experts_per_node: moe.min_experts_per_node,
-                                    source: moe.source.clone(),
-                                }),
-                        }
-                    }),
-                })
-                .collect()
-        } else {
-            pa.available_model_identities
                 .iter()
                 .map(legacy_descriptor_from_identity)
                 .collect()

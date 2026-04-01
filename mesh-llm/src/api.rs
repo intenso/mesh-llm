@@ -13,16 +13,13 @@
 use crate::{affinity, election, mesh, nostr, plugin, proxy};
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex};
 
 static CONSOLE_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 const MESH_LLM_VERSION: &str = crate::VERSION;
-const LOCAL_SCAN_CACHE_TTL: Duration = Duration::from_secs(15);
 
 // ── Shared state ──
 
@@ -48,30 +45,7 @@ struct ApiInner {
     latest_version: Option<String>,
     nostr_relays: Vec<String>,
     nostr_discovery: bool,
-    local_scan_cache: Option<LocalScanSnapshot>,
-    local_scan_cache_at: Option<Instant>,
     sse_clients: Vec<tokio::sync::mpsc::UnboundedSender<String>>,
-}
-
-#[derive(Clone)]
-struct LocalScanSnapshot {
-    model_names: HashSet<String>,
-    metadata_by_name: HashMap<String, crate::proto::node::CompactModelMetadata>,
-    size_by_name: HashMap<String, u64>,
-}
-
-fn build_local_scan_snapshot() -> LocalScanSnapshot {
-    let model_names = mesh::scan_local_models().into_iter().collect();
-    let metadata_by_name = mesh::scan_all_model_metadata()
-        .into_iter()
-        .map(|meta| (meta.model_key.clone(), meta))
-        .collect();
-    let size_by_name = mesh::scan_local_model_sizes();
-    LocalScanSnapshot {
-        model_names,
-        metadata_by_name,
-        size_by_name,
-    }
 }
 
 #[derive(Serialize)]
@@ -320,8 +294,6 @@ impl MeshApi {
                     .map(|s| s.to_string())
                     .collect(),
                 nostr_discovery: false,
-                local_scan_cache: None,
-                local_scan_cache_at: None,
                 sse_clients: Vec::new(),
             })),
         }
@@ -358,34 +330,6 @@ impl MeshApi {
 
     pub async fn set_llama_port(&self, port: Option<u16>) {
         self.inner.lock().await.llama_port = port;
-    }
-
-    async fn local_scan_snapshot(&self) -> LocalScanSnapshot {
-        let cached = {
-            let inner = self.inner.lock().await;
-            match (&inner.local_scan_cache, inner.local_scan_cache_at) {
-                (Some(snapshot), Some(cached_at)) if cached_at.elapsed() < LOCAL_SCAN_CACHE_TTL => {
-                    Some(snapshot.clone())
-                }
-                _ => None,
-            }
-        };
-        if let Some(snapshot) = cached {
-            return snapshot;
-        }
-
-        let snapshot = tokio::task::spawn_blocking(build_local_scan_snapshot)
-            .await
-            .unwrap_or_else(|_| LocalScanSnapshot {
-                model_names: HashSet::new(),
-                metadata_by_name: HashMap::new(),
-                size_by_name: HashMap::new(),
-            });
-
-        let mut inner = self.inner.lock().await;
-        inner.local_scan_cache = Some(snapshot.clone());
-        inner.local_scan_cache_at = Some(Instant::now());
-        snapshot
     }
 
     async fn status(&self) -> StatusPayload {
@@ -432,7 +376,9 @@ impl MeshApi {
         }; // inner lock dropped here
 
         let all_peers = node.peers().await;
-        let local_scan = self.local_scan_snapshot().await;
+        let local_scan = tokio::task::spawn_blocking(crate::models::scan_local_inventory_snapshot)
+            .await
+            .unwrap_or_default();
         let peers: Vec<PeerPayload> = all_peers
             .iter()
             .map(|p| PeerPayload {

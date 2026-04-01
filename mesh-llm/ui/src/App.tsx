@@ -1465,6 +1465,7 @@ export function App() {
                   status={status}
                   topologyNodes={topologyNodes}
                   selectedModel={selectedModel || status?.model_name || ""}
+                  meshModelByName={meshModelByName}
                   themeMode={themeMode}
                   isPublicMesh={status?.nostr_discovery ?? false}
                   inviteToken={inviteToken}
@@ -2930,6 +2931,7 @@ function DashboardPage({
   status,
   topologyNodes,
   selectedModel,
+  meshModelByName,
   themeMode,
   isPublicMesh,
   inviteToken,
@@ -2938,6 +2940,7 @@ function DashboardPage({
   status: StatusPayload | null;
   topologyNodes: TopologyNode[];
   selectedModel: string;
+  meshModelByName: Record<string, MeshModel>;
   themeMode: ThemeMode;
   isPublicMesh: boolean;
   inviteToken: string;

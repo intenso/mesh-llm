@@ -32,9 +32,7 @@ message PeerAnnouncement {
   map<string, uint64> available_model_sizes = 21;   // file sizes (bytes) per GGUF model name
   bytes serialized_addr = 22;                        // JSON-serialized EndpointAddr (includes network addresses for peer discovery)
   repeated ServedModelIdentity served_model_identities = 23;
-  repeated ServedModelIdentity available_model_identities = 24;
   repeated ServedModelDescriptor served_model_descriptors = 25;
-  repeated ServedModelDescriptor available_model_descriptors = 26;
 }
 
 message ServedModelDescriptor {

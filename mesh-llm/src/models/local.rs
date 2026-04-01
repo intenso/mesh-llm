@@ -1,6 +1,8 @@
 use hf_hub::Cache;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HuggingFaceModelIdentity {
@@ -54,6 +56,20 @@ pub fn legacy_models_dir() -> PathBuf {
         .join(".models")
 }
 
+pub fn mesh_llm_cache_dir() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".cache")
+        })
+        .join("mesh-llm")
+}
+
+pub fn model_metadata_cache_dir() -> PathBuf {
+    mesh_llm_cache_dir().join("model-meta")
+}
+
 pub fn legacy_models_present() -> bool {
     let legacy_dir = legacy_models_dir();
     if !legacy_dir.exists() {
@@ -100,6 +116,28 @@ pub fn huggingface_identity_for_path(path: &Path) -> Option<HuggingFaceModelIden
 
 pub fn exact_model_source_for_path(path: &Path) -> Option<String> {
     huggingface_identity_for_path(path).map(|identity| identity.canonical_ref)
+}
+
+pub fn gguf_metadata_cache_path(path: &Path) -> Option<PathBuf> {
+    let key = if let Some(identity) = huggingface_identity_for_path(path) {
+        format!("hf:{}", identity.canonical_ref)
+    } else {
+        let metadata = std::fs::metadata(path).ok()?;
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        format!(
+            "local:{}:{}:{}",
+            path.to_string_lossy(),
+            metadata.len(),
+            modified
+        )
+    };
+    let digest = Sha256::digest(key.as_bytes());
+    Some(model_metadata_cache_dir().join(format!("{digest:x}.json")))
 }
 
 pub fn path_is_in_legacy_models_dir(path: &Path) -> bool {

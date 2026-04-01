@@ -256,7 +256,11 @@ pub(crate) async fn write_gossip_payload(
             write_len_prefixed(send, &frame.encode_to_vec()).await?;
         }
         ControlProtocol::JsonV0 => {
-            let json = serde_json::to_vec(anns)?;
+            let sanitized: Vec<PeerAnnouncement> = anns
+                .iter()
+                .map(crate::protocol::convert::sanitize_gossip_announcement_for_wire)
+                .collect();
+            let json = serde_json::to_vec(&sanitized)?;
             write_len_prefixed(send, &json).await?;
         }
     }
@@ -290,6 +294,9 @@ pub(crate) fn decode_gossip_payload(
         ControlProtocol::JsonV0 => {
             let mut anns: Vec<PeerAnnouncement> = serde_json::from_slice(buf)?;
             for ann in &mut anns {
+                ann.available_models.clear();
+                ann.available_model_metadata.clear();
+                ann.available_model_sizes.clear();
                 crate::mesh::backfill_legacy_descriptors(ann);
             }
             Ok(anns
@@ -398,7 +405,6 @@ mod tests {
             experts_summary: None,
             available_model_sizes: HashMap::from([("Qwen".into(), 1234_u64)]),
             served_model_descriptors: vec![],
-            available_model_descriptors: vec![],
         };
         let json = serde_json::to_vec(&vec![ann.clone()]).unwrap();
 
@@ -408,6 +414,10 @@ mod tests {
         assert_eq!(decoded[0].0.id, peer_id);
         assert_eq!(decoded[0].1.serving.as_deref(), Some("Qwen"));
         assert_eq!(decoded[0].1.mesh_id.as_deref(), Some("mesh-compat"));
+        assert!(
+            decoded[0].1.available_models.is_empty(),
+            "legacy JSON gossip must not populate passive available_models"
+        );
     }
 
     #[test]
@@ -798,7 +808,6 @@ mod tests {
             experts_summary: None,
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
-            available_model_descriptors: vec![],
         };
         let json = serde_json::to_vec(&vec![ann]).expect("JSON serialization must succeed");
 

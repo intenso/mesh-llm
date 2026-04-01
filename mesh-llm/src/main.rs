@@ -962,8 +962,6 @@ async fn run_auto(
 
     // Advertise what we have on disk and what we want the mesh to serve
     node.set_available_models(local_models.clone()).await;
-    node.set_available_model_descriptors(mesh::infer_available_model_descriptors(&local_models))
-        .await;
     node.set_requested_models(requested_model_names.clone())
         .await;
 
@@ -1561,8 +1559,6 @@ async fn run_idle(cli: Cli, _bin_dir: PathBuf) -> Result<()> {
     )
     .await?;
     node.set_available_models(local_models.clone()).await;
-    node.set_available_model_descriptors(mesh::infer_available_model_descriptors(&local_models))
-        .await;
     node.set_blackboard_name(blackboard_display_name(&cli, &node))
         .await;
     let (plugin_mesh_tx, plugin_mesh_rx) = tokio::sync::mpsc::channel(256);

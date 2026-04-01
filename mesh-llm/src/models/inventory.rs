@@ -1,0 +1,273 @@
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use super::local::{
+    find_model_path as find_local_model_path, gguf_metadata_cache_path, model_dirs,
+};
+
+#[derive(Clone, Debug, Default)]
+pub struct LocalModelInventorySnapshot {
+    pub model_names: HashSet<String>,
+    pub size_by_name: HashMap<String, u64>,
+    pub metadata_by_name: HashMap<String, crate::proto::node::CompactModelMetadata>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CachedCompactModelMetadata {
+    model_key: String,
+    context_length: u32,
+    vocab_size: u32,
+    embedding_size: u32,
+    head_count: u32,
+    layer_count: u32,
+    feed_forward_length: u32,
+    key_length: u32,
+    value_length: u32,
+    architecture: String,
+    tokenizer_model_name: String,
+    rope_scale: f32,
+    rope_freq_base: f32,
+    is_moe: bool,
+    expert_count: u32,
+    used_expert_count: u32,
+    quantization_type: String,
+}
+
+impl CachedCompactModelMetadata {
+    fn into_proto(self) -> crate::proto::node::CompactModelMetadata {
+        crate::proto::node::CompactModelMetadata {
+            model_key: self.model_key,
+            context_length: self.context_length,
+            vocab_size: self.vocab_size,
+            embedding_size: self.embedding_size,
+            head_count: self.head_count,
+            layer_count: self.layer_count,
+            feed_forward_length: self.feed_forward_length,
+            key_length: self.key_length,
+            value_length: self.value_length,
+            architecture: self.architecture,
+            tokenizer_model_name: self.tokenizer_model_name,
+            special_tokens: vec![],
+            rope_scale: self.rope_scale,
+            rope_freq_base: self.rope_freq_base,
+            is_moe: self.is_moe,
+            expert_count: self.expert_count,
+            used_expert_count: self.used_expert_count,
+            quantization_type: self.quantization_type,
+        }
+    }
+
+    fn from_proto(meta: &crate::proto::node::CompactModelMetadata) -> Self {
+        Self {
+            model_key: meta.model_key.clone(),
+            context_length: meta.context_length,
+            vocab_size: meta.vocab_size,
+            embedding_size: meta.embedding_size,
+            head_count: meta.head_count,
+            layer_count: meta.layer_count,
+            feed_forward_length: meta.feed_forward_length,
+            key_length: meta.key_length,
+            value_length: meta.value_length,
+            architecture: meta.architecture.clone(),
+            tokenizer_model_name: meta.tokenizer_model_name.clone(),
+            rope_scale: meta.rope_scale,
+            rope_freq_base: meta.rope_freq_base,
+            is_moe: meta.is_moe,
+            expert_count: meta.expert_count,
+            used_expert_count: meta.used_expert_count,
+            quantization_type: meta.quantization_type.clone(),
+        }
+    }
+}
+
+fn push_gguf_files_recursive(dir: &Path, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            push_gguf_files_recursive(&path, out, seen);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("gguf") {
+            continue;
+        }
+        let normalized = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if seen.insert(normalized) {
+            out.push(path);
+        }
+    }
+}
+
+fn local_gguf_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for models_dir in model_dirs() {
+        push_gguf_files_recursive(&models_dir, &mut out, &mut seen);
+    }
+    out.sort();
+    out
+}
+
+fn derive_quantization_type(stem: &str) -> String {
+    let parts: Vec<&str> = stem.split('-').collect();
+    for &part in parts.iter().rev() {
+        let upper = part.to_uppercase();
+        if upper.starts_with('Q')
+            || upper.starts_with("IQ")
+            || upper.starts_with('F')
+            || upper.starts_with("BF")
+        {
+            if upper.len() >= 2
+                && upper
+                    .chars()
+                    .nth(1)
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+                || upper.starts_with("IQ")
+                || upper.starts_with("BF")
+            {
+                return part.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn split_gguf_base_name(stem: &str) -> Option<&str> {
+    let suffix = stem.rfind("-of-")?;
+    let part_num = &stem[suffix + 4..];
+    if part_num.len() != 5 || !part_num.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let dash = stem[..suffix].rfind('-')?;
+    let seq = &stem[dash + 1..suffix];
+    if seq.len() != 5 || !seq.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(&stem[..dash])
+}
+
+fn compact_metadata_from_gguf(
+    path: &Path,
+    model_key: String,
+    quantization_type: String,
+) -> crate::proto::node::CompactModelMetadata {
+    if let Some(m) = crate::moe::scan_gguf_compact_meta(path) {
+        crate::proto::node::CompactModelMetadata {
+            model_key: model_key.clone(),
+            context_length: m.context_length,
+            vocab_size: m.vocab_size,
+            embedding_size: m.embedding_size,
+            head_count: m.head_count,
+            layer_count: m.layer_count,
+            feed_forward_length: m.feed_forward_length,
+            key_length: m.key_length,
+            value_length: m.value_length,
+            architecture: m.architecture,
+            tokenizer_model_name: m.tokenizer_model_name,
+            special_tokens: vec![],
+            rope_scale: m.rope_scale,
+            rope_freq_base: m.rope_freq_base,
+            is_moe: m.expert_count > 1,
+            expert_count: m.expert_count,
+            used_expert_count: m.expert_used_count,
+            quantization_type,
+        }
+    } else {
+        crate::proto::node::CompactModelMetadata {
+            model_key,
+            quantization_type,
+            ..Default::default()
+        }
+    }
+}
+
+fn cached_compact_metadata_for_path(
+    path: &Path,
+    model_key: String,
+    quantization_type: String,
+) -> crate::proto::node::CompactModelMetadata {
+    let computed =
+        || compact_metadata_from_gguf(path, model_key.clone(), quantization_type.clone());
+    let Some(cache_path) = gguf_metadata_cache_path(path) else {
+        return computed();
+    };
+    if let Ok(bytes) = std::fs::read(&cache_path) {
+        if let Ok(cached) = serde_json::from_slice::<CachedCompactModelMetadata>(&bytes) {
+            return cached.into_proto();
+        }
+    }
+    let meta = computed();
+    if let Some(parent) = cache_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec(&CachedCompactModelMetadata::from_proto(&meta)) {
+        let _ = std::fs::write(cache_path, bytes);
+    }
+    meta
+}
+
+pub fn scan_local_inventory_snapshot() -> LocalModelInventorySnapshot {
+    let mut snapshot = LocalModelInventorySnapshot::default();
+    for path in local_gguf_paths() {
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if size < 500_000_000 {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let model_key = split_gguf_base_name(stem).unwrap_or(stem).to_string();
+        let quantization_type = derive_quantization_type(&model_key);
+
+        snapshot.model_names.insert(model_key.clone());
+        snapshot
+            .size_by_name
+            .entry(model_key.clone())
+            .and_modify(|total| *total += size)
+            .or_insert(size);
+        snapshot
+            .metadata_by_name
+            .entry(model_key.clone())
+            .or_insert_with(|| {
+                cached_compact_metadata_for_path(
+                    &path,
+                    model_key.clone(),
+                    quantization_type.clone(),
+                )
+            });
+    }
+    snapshot
+}
+
+pub fn scan_local_models() -> Vec<String> {
+    let mut names: Vec<String> = scan_local_inventory_snapshot()
+        .model_names
+        .into_iter()
+        .collect();
+    names.sort();
+    names
+}
+
+pub fn scan_local_model_sizes() -> HashMap<String, u64> {
+    scan_local_inventory_snapshot().size_by_name
+}
+
+pub fn scan_all_model_metadata() -> Vec<crate::proto::node::CompactModelMetadata> {
+    let mut result: Vec<_> = scan_local_inventory_snapshot()
+        .metadata_by_name
+        .into_values()
+        .collect();
+    result.sort_by(|a, b| a.model_key.cmp(&b.model_key));
+    result
+}
+
+pub fn find_model_path(stem: &str) -> PathBuf {
+    find_local_model_path(stem)
+}
