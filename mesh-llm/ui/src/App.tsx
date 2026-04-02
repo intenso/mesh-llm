@@ -995,7 +995,11 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!status || !modelCatalogKey) return;
+    if (!modelCatalogKey) {
+      setModelsPayload(null);
+      setModelsLoading(false);
+      return;
+    }
     const controller = new AbortController();
     let cancelled = false;
     setModelsLoading(true);
@@ -1019,7 +1023,7 @@ export function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [status, modelCatalogKey]);
+  }, [modelCatalogKey]);
 
   useEffect(() => {
     const el = chatScrollRef.current;
