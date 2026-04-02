@@ -51,10 +51,6 @@ impl CatalogModel {
     pub fn source_file(&self) -> Option<&str> {
         parse_hf_resolve_url_parts(&self.url).map(|(_, _, file)| file)
     }
-
-    pub fn source_page_url(&self) -> Option<String> {
-        huggingface_repo_url(&self.url)
-    }
 }
 
 /// Pre-computed MoE expert sharding configuration for a model.

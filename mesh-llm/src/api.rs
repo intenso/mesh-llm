@@ -249,7 +249,7 @@ struct MeshModelPayload {
     auto_command: String,
 }
 
-fn find_catalog_model<'a>(name: &str) -> Option<&'a crate::models::catalog::CatalogModel> {
+fn find_catalog_model(name: &str) -> Option<&'static crate::models::catalog::CatalogModel> {
     crate::models::catalog::MODEL_CATALOG
         .iter()
         .find(|m| m.name == name || m.file.strip_suffix(".gguf").unwrap_or(m.file.as_str()) == name)
@@ -290,6 +290,13 @@ fn source_file_from_identity(identity: &mesh::ServedModelIdentity) -> Option<Str
 fn likely_reasoning_model(name: &str, description: Option<&str>) -> bool {
     let haystack = format!("{} {}", name, description.unwrap_or_default()).to_ascii_lowercase();
     ["reasoning", "thinking", "deepseek-r1"]
+        .iter()
+        .any(|needle| haystack.contains(needle))
+}
+
+fn likely_vision_model(name: &str, description: Option<&str>) -> bool {
+    let haystack = format!("{} {}", name, description.unwrap_or_default()).to_ascii_lowercase();
+    ["vision", "-vl", "llava", "omni", "qwen2.5-vl", "mllama"]
         .iter()
         .any(|needle| haystack.contains(needle))
 }
@@ -626,7 +633,7 @@ impl MeshApi {
                 let local_known = local_model_names.contains(name)
                     || my_hosted_models.iter().any(|s| s == name)
                     || my_serving_models.iter().any(|s| s == name)
-                    || *name == model_name;
+                    || name == &model_name;
                 let display_name = crate::models::installed_model_display_name(name);
                 let node_count = if is_warm {
                     let peer_count = all_peers.iter().filter(|p| p.routes_model(name)).count();
@@ -681,7 +688,7 @@ impl MeshApi {
                 } else {
                     0.0
                 };
-                let size_gb = if *name == model_name && model_size_bytes > 0 {
+                let size_gb = if name == &model_name && model_size_bytes > 0 {
                     model_size_bytes as f64 / 1e9
                 } else {
                     size_by_name
@@ -716,6 +723,14 @@ impl MeshApi {
                 {
                     capabilities.reasoning = capabilities
                         .reasoning
+                        .max(crate::models::capabilities::CapabilityLevel::Likely);
+                }
+                // Apply vision name heuristic the same way — upgrade before deriving fields.
+                if local_known
+                    && likely_vision_model(name, catalog_entry.map(|m| m.description.as_str()))
+                {
+                    capabilities.vision = capabilities
+                        .vision
                         .max(crate::models::capabilities::CapabilityLevel::Likely);
                 }
                 let vision = capabilities.supports_vision_runtime();
@@ -753,9 +768,11 @@ impl MeshApi {
                     .map(str::to_string)
                     .or_else(|| {
                         catalog_entry.map(|m| m.file.to_string()).and_then(|file| {
-                            file.strip_suffix(".gguf")
-                                .and_then(|stem| stem.split('-').next_back())
-                                .map(str::to_string)
+                            let quant = file
+                                .strip_suffix(".gguf")
+                                .map(crate::models::inventory::derive_quantization_type)
+                                .filter(|q| !q.is_empty())?;
+                            Some(quant)
                         })
                     });
                 let topology_moe = descriptor
@@ -790,7 +807,9 @@ impl MeshApi {
                         .and_then(source_page_url_from_identity)
                         .or_else(|| {
                             if local_known {
-                                catalog_entry.and_then(|m| m.source_page_url())
+                                catalog_entry.and_then(|m| {
+                                    crate::models::catalog::huggingface_repo_url(&m.url)
+                                })
                             } else {
                                 None
                             }

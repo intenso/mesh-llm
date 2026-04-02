@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::local::{gguf_metadata_cache_path, model_dirs};
+use super::local::{
+    gguf_metadata_cache_path, huggingface_hub_cache, huggingface_hub_cache_dir, legacy_models_dir,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct LocalModelInventorySnapshot {
@@ -121,14 +123,45 @@ fn push_gguf_files_recursive(dir: &Path, out: &mut Vec<PathBuf>, seen: &mut Hash
 fn local_gguf_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for models_dir in model_dirs() {
-        push_gguf_files_recursive(&models_dir, &mut out, &mut seen);
+
+    // Use CacheInfo to enumerate GGUF files in the HF cache instead of
+    // recursively walking the entire cache root (which includes blobs, refs,
+    // lock files, and other non-model subdirectories that are expensive to scan).
+    let hf_cache_dir = huggingface_hub_cache_dir();
+    if hf_cache_dir.exists() {
+        let cache = huggingface_hub_cache();
+        if let Ok(cache_info) = hf_hub::cache::CacheInfo::scan_dir(Some(cache.path())) {
+            for repo in &cache_info.repos {
+                if !repo.cache_id().starts_with("model/") {
+                    continue;
+                }
+                for revision in &repo.revisions {
+                    for file in &revision.files {
+                        if !file.file_name.ends_with(".gguf") {
+                            continue;
+                        }
+                        let path = file.file_path.clone();
+                        let normalized = path.canonicalize().unwrap_or_else(|_| path.clone());
+                        if seen.insert(normalized) {
+                            out.push(path);
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    // Walk legacy models dir (user-placed files, not HF cache).
+    let legacy_dir = legacy_models_dir();
+    if legacy_dir.exists() {
+        push_gguf_files_recursive(&legacy_dir, &mut out, &mut seen);
+    }
+
     out.sort();
     out
 }
 
-fn derive_quantization_type(stem: &str) -> String {
+pub(crate) fn derive_quantization_type(stem: &str) -> String {
     let parts: Vec<&str> = stem.split('-').collect();
     for &part in parts.iter().rev() {
         let upper = part.to_uppercase();

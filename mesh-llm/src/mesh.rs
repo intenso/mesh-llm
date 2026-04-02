@@ -267,7 +267,12 @@ fn identity_from_model_source(source: &str) -> Option<ServedModelIdentity> {
         });
     }
 
-    if trimmed.ends_with(".gguf") || trimmed.contains('/') {
+    if trimmed.ends_with(".gguf")
+        || trimmed.starts_with('/')
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || (trimmed.contains('/') && !trimmed.ends_with('/') && trimmed.split('/').count() != 2)
+    {
         let local_file_name = std::path::Path::new(trimmed)
             .file_name()
             .and_then(|value| value.to_str())
