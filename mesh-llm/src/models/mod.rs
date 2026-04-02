@@ -23,10 +23,7 @@ pub use cli::{
     run_model_download, run_model_installed, run_model_recommended, run_model_search,
     run_model_show, warn_about_legacy_model_usage,
 };
-pub use inventory::{
-    scan_local_inventory_snapshot_with_progress, LocalModelInventorySnapshot,
-    ModelMetadataCacheProgress,
-};
+pub use inventory::{scan_local_inventory_snapshot_with_progress, LocalModelInventorySnapshot};
 pub use local::{
     exact_model_source_for_path, find_model_path, huggingface_hub_cache, huggingface_hub_cache_dir,
     huggingface_identity_for_path, legacy_models_dir, legacy_models_present, model_dirs,

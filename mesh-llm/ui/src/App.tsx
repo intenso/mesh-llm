@@ -227,6 +227,9 @@ type StatusPayload = {
   is_client: boolean;
   llama_ready: boolean;
   model_name: string;
+  models?: string[];
+  available_models?: string[];
+  requested_models?: string[];
   serving_models?: string[];
   hosted_models?: string[];
   api_port: number;
@@ -234,7 +237,6 @@ type StatusPayload = {
   model_size_gb: number;
   mesh_name?: string | null;
   peers: Peer[];
-  mesh_models: MeshModel[];
   inflight_requests: number;
   launch_pi?: string | null;
   launch_goose?: string | null;
@@ -242,10 +244,10 @@ type StatusPayload = {
   my_hostname?: string;
   my_is_soc?: boolean;
   gpus?: { name: string; vram_bytes: number; bandwidth_gbps?: number }[];
-  inventory_cache_progress?: {
-    missing_cache_files_total: number;
-    missing_cache_files_done: number;
-  } | null;
+};
+
+type ModelsPayload = {
+  mesh_models: MeshModel[];
 };
 
 type ChatMessage = {
@@ -650,6 +652,8 @@ export function App() {
   );
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const [status, setStatus] = useState<StatusPayload | null>(null);
+  const [modelsPayload, setModelsPayload] = useState<ModelsPayload | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [chatState, setChatState] = useState<ChatState>(() =>
     createInitialChatState(),
   );
@@ -674,14 +678,15 @@ export function App() {
     [conversations, activeConversationId],
   );
   const messages = activeConversation?.messages ?? [];
+  const meshModels = modelsPayload?.mesh_models ?? [];
 
   const warmModels = useMemo(() => {
-    const list = (status?.mesh_models ?? [])
+    const list = meshModels
       .filter((m) => m.status === "warm")
       .map((m) => m.name);
     if (!list.length && status?.model_name) list.push(status.model_name);
     return list;
-  }, [status]);
+  }, [meshModels, status?.model_name]);
   const modelStatsByName = useMemo<Record<string, ModelServingStat>>(() => {
     const stats: Record<string, ModelServingStat> = {};
     for (const model of warmModels) stats[model] = { nodes: 0, vramGb: 0 };
@@ -703,35 +708,33 @@ export function App() {
       }
     }
 
-    for (const model of status.mesh_models ?? []) {
+    for (const model of meshModels) {
       if (!stats[model.name]) continue;
       if (stats[model.name].nodes === 0)
         stats[model.name].nodes = Math.max(0, model.node_count || 0);
     }
 
     return stats;
-  }, [status, warmModels]);
+  }, [status, warmModels, meshModels]);
   const selectedChatModel =
     selectedModel || warmModels[0] || status?.model_name || "";
   const visionModels = useMemo(() => {
     const set = new Set<string>();
-    for (const m of status?.mesh_models ?? []) {
+    for (const m of meshModels) {
       if (m.vision) set.add(m.name);
     }
     return set;
-  }, [status?.mesh_models]);
+  }, [meshModels]);
   const selectedModelVision = useMemo(() => {
     if (selectedModel) return visionModels.has(selectedModel);
-    return (status?.mesh_models ?? []).some(
-      (m) => m.status === "warm" && m.vision,
-    );
-  }, [status?.mesh_models, selectedModel, visionModels]);
+    return meshModels.some((m) => m.status === "warm" && m.vision);
+  }, [meshModels, selectedModel, visionModels]);
   const meshModelByName = useMemo(() => {
-    const entries = (status?.mesh_models ?? []).map(
+    const entries = meshModels.map(
       (model) => [model.name, model] as const,
     );
     return Object.fromEntries(entries) as Record<string, MeshModel>;
-  }, [status?.mesh_models]);
+  }, [meshModels]);
   const selectedModelStat = selectedChatModel
     ? modelStatsByName[selectedChatModel]
     : undefined;
@@ -767,6 +770,31 @@ export function App() {
     const port = status?.api_port ?? 9337;
     return `http://127.0.0.1:${port}/v1`;
   }, [status?.api_port, isLocalhost]);
+  const modelCatalogKey = useMemo(() => {
+    if (!status) return "";
+    const local = [
+      status.model_name,
+      ...(status.models ?? []),
+      ...(status.available_models ?? []),
+      ...(status.requested_models ?? []),
+      ...(status.serving_models ?? []),
+      ...(status.hosted_models ?? []),
+    ].join(",");
+    const peers = [...(status.peers ?? [])]
+      .map((peer) =>
+        [
+          peer.id,
+          ...(peer.models ?? []),
+          ...(peer.available_models ?? []),
+          ...(peer.requested_models ?? []),
+          ...(peer.serving_models ?? []),
+          ...(peer.hosted_models ?? []),
+        ].join(","),
+      )
+      .sort()
+      .join("|");
+    return `${status.node_id}::${local}::${peers}`;
+  }, [status]);
 
   useEffect(() => {
     if (!warmModels.length) return;
@@ -965,6 +993,33 @@ export function App() {
       closeStatusEvents();
     };
   }, []);
+
+  useEffect(() => {
+    if (!status || !modelCatalogKey) return;
+    const controller = new AbortController();
+    let cancelled = false;
+    setModelsLoading(true);
+    fetch("/api/models", { signal: controller.signal })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<ModelsPayload>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setModelsPayload(data);
+      })
+      .catch((err: Error) => {
+        if (cancelled || err.name === "AbortError") return;
+        console.warn("Failed to fetch /api/models:", err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setModelsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [status, modelCatalogKey]);
 
   useEffect(() => {
     const el = chatScrollRef.current;
@@ -1506,6 +1561,8 @@ export function App() {
               <div className="mx-auto w-full max-w-7xl p-4">
                 <DashboardPage
                   status={status}
+                  meshModels={meshModels}
+                  modelsLoading={modelsLoading}
                   topologyNodes={topologyNodes}
                   selectedModel={selectedModel || status?.model_name || ""}
                   meshModelByName={meshModelByName}
@@ -2971,6 +3028,8 @@ function InviteFriendEmptyState({
 
 function DashboardPage({
   status,
+  meshModels,
+  modelsLoading,
   topologyNodes,
   selectedModel,
   meshModelByName,
@@ -2980,6 +3039,8 @@ function DashboardPage({
   isLocalhost,
 }: {
   status: StatusPayload | null;
+  meshModels: MeshModel[];
+  modelsLoading: boolean;
   topologyNodes: TopologyNode[];
   selectedModel: string;
   meshModelByName: Record<string, MeshModel>;
@@ -2994,26 +3055,13 @@ function DashboardPage({
   const [isMeshOverviewFullscreen, setIsMeshOverviewFullscreen] = useState(false);
   const [selectedCatalogModel, setSelectedCatalogModel] = useState<MeshModel | null>(null);
   const filteredModels = useMemo(() => {
-    const models = status?.mesh_models ?? [];
+    const models = meshModels;
     return [...models]
       .filter((m) => (modelFilter === "all" ? true : m.status === modelFilter))
       .sort(
         (a, b) => b.node_count - a.node_count || a.name.localeCompare(b.name),
       );
-  }, [status?.mesh_models, modelFilter]);
-  const inventoryCacheProgress = status?.inventory_cache_progress ?? null;
-  const inventoryCacheProgressTotal =
-    inventoryCacheProgress?.missing_cache_files_total ?? 0;
-  const inventoryCacheProgressDone = Math.min(
-    inventoryCacheProgress?.missing_cache_files_done ?? 0,
-    inventoryCacheProgressTotal,
-  );
-  const inventoryCacheProgressPct =
-    inventoryCacheProgressTotal > 0
-      ? Math.round(
-          (inventoryCacheProgressDone / inventoryCacheProgressTotal) * 100,
-        )
-      : 0;
+  }, [meshModels, modelFilter]);
   const totalMeshVramGb = useMemo(() => meshGpuVram(status), [status]);
   const sortedPeers = useMemo(() => {
     return [...(status?.peers ?? [])].sort((a, b) => {
@@ -3135,22 +3183,15 @@ function DashboardPage({
           </a>
         </AlertDescription>
       </Alert>
-      {inventoryCacheProgressTotal > 0 ? (
+      {modelsLoading && meshModels.length === 0 ? (
         <Alert className="border-border/60 bg-card/80">
           <Loader2 className="h-4 w-4 animate-spin" />
           <AlertTitle className="text-sm font-medium">
-            Updating GGUF cache
+            Loading model catalog
           </AlertTitle>
           <AlertDescription className="space-y-2">
             <div className="text-xs text-muted-foreground">
-              {inventoryCacheProgressDone} of {inventoryCacheProgressTotal}{" "}
-              missing cache files processed
-            </div>
-            <div className="h-2 overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full bg-primary transition-[width] duration-300 ease-out"
-                style={{ width: `${inventoryCacheProgressPct}%` }}
-              />
+              Scanning local models and assembling mesh metadata.
             </div>
           </AlertDescription>
         </Alert>
@@ -3171,7 +3212,7 @@ function DashboardPage({
           />
           <StatCard
             title="Active Models"
-            value={`${(status?.mesh_models ?? []).filter((m) => m.status === "warm").length}`}
+            value={`${meshModels.filter((m) => m.status === "warm").length}`}
             icon={<Sparkles className="h-4 w-4" />}
             tooltip="Models currently loaded and serving across the mesh."
           />
@@ -3305,14 +3346,16 @@ function DashboardPage({
                 <DashboardPanelEmpty
                   icon={<Sparkles className="h-4 w-4" />}
                   title={
-                    (status?.mesh_models.length ?? 0) > 0
+                    meshModels.length > 0
                       ? `No ${modelFilter} models`
                       : "No model catalog data"
                   }
                   description={
-                    (status?.mesh_models.length ?? 0) > 0
+                    meshModels.length > 0
                       ? "Try changing the model filter."
-                      : "Model metadata will appear once the mesh reports available models."
+                      : modelsLoading
+                        ? "The model catalog will appear once the local scan completes."
+                        : "Model metadata will appear once the mesh reports available models."
                   }
                 />
               </div>

@@ -92,10 +92,9 @@ struct ApiInner {
     runtime_control: Option<tokio::sync::mpsc::UnboundedSender<RuntimeControlRequest>>,
     local_processes: Vec<RuntimeProcessPayload>,
     sse_clients: Vec<tokio::sync::mpsc::UnboundedSender<String>>,
-    /// Cached result of the last local inventory scan so `status()` never
-    /// blocks on filesystem/GGUF reads.
-    cached_inventory: crate::models::LocalModelInventorySnapshot,
-    inventory_cache_progress: Option<crate::models::ModelMetadataCacheProgress>,
+    inventory_scan_running: bool,
+    inventory_scan_waiters:
+        Vec<tokio::sync::oneshot::Sender<crate::models::LocalModelInventorySnapshot>>,
 }
 
 #[derive(Serialize)]
@@ -157,7 +156,6 @@ struct StatusPayload {
     peers: Vec<PeerPayload>,
     launch_pi: Option<String>,
     launch_goose: Option<String>,
-    mesh_models: Vec<MeshModelPayload>,
     inflight_requests: u64,
     /// Mesh identity (for matching against discovered meshes)
     mesh_id: Option<String>,
@@ -169,8 +167,11 @@ struct StatusPayload {
     my_is_soc: Option<bool>,
     gpus: Vec<GpuEntry>,
     routing_affinity: affinity::AffinityStatsSnapshot,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inventory_cache_progress: Option<crate::models::ModelMetadataCacheProgress>,
+}
+
+#[derive(Serialize)]
+struct ModelsPayload {
+    mesh_models: Vec<MeshModelPayload>,
 }
 
 #[derive(Serialize)]
@@ -377,8 +378,8 @@ impl MeshApi {
                 runtime_control: None,
                 local_processes: Vec::new(),
                 sse_clients: Vec::new(),
-                cached_inventory: crate::models::LocalModelInventorySnapshot::default(),
-                inventory_cache_progress: None,
+                inventory_scan_running: false,
+                inventory_scan_waiters: Vec::new(),
             })),
         }
     }
@@ -444,44 +445,45 @@ impl MeshApi {
         self.inner.lock().await.llama_port = port;
     }
 
-    /// Refresh the cached local inventory snapshot in a blocking thread pool task.
-    /// Called at startup and on explicit invalidation paths.
-    async fn refresh_inventory_cache(&self) {
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-        let progress_state = self.clone();
-        let progress_task = tokio::spawn(async move {
-            while let Some(progress) = progress_rx.recv().await {
-                {
-                    let mut inner = progress_state.inner.lock().await;
-                    inner.inventory_cache_progress = Some(progress);
-                }
-                progress_state.push_status().await;
+    async fn local_inventory_snapshot(&self) -> crate::models::LocalModelInventorySnapshot {
+        let maybe_wait = {
+            let mut inner = self.inner.lock().await;
+            if inner.inventory_scan_running {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                inner.inventory_scan_waiters.push(tx);
+                Some(rx)
+            } else {
+                inner.inventory_scan_running = true;
+                None
             }
-        });
+        };
 
-        match tokio::task::spawn_blocking(move || {
-            crate::models::scan_local_inventory_snapshot_with_progress(|progress| {
-                let _ = progress_tx.send(progress);
-            })
+        if let Some(rx) = maybe_wait {
+            return rx.await.unwrap_or_default();
+        }
+
+        let snapshot = match tokio::task::spawn_blocking(|| {
+            crate::models::scan_local_inventory_snapshot_with_progress(|_| {})
         })
         .await
         {
-            Ok(snapshot) => {
-                let _ = progress_task.await;
-                {
-                    let mut inner = self.inner.lock().await;
-                    inner.cached_inventory = snapshot;
-                    inner.inventory_cache_progress = None;
-                }
-                self.push_status().await;
-            }
+            Ok(snapshot) => snapshot,
             Err(e) => {
-                let _ = progress_task.await;
-                self.inner.lock().await.inventory_cache_progress = None;
-                self.push_status().await;
-                tracing::warn!("Local inventory cache refresh failed: {e}");
+                tracing::warn!("Local inventory scan failed: {e}");
+                crate::models::LocalModelInventorySnapshot::default()
             }
+        };
+
+        let waiters = {
+            let mut inner = self.inner.lock().await;
+            inner.inventory_scan_running = false;
+            std::mem::take(&mut inner.inventory_scan_waiters)
+        };
+        for tx in waiters {
+            let _ = tx.send(snapshot.clone());
         }
+
+        snapshot
     }
 
     async fn runtime_status(&self) -> RuntimeStatusPayload {
@@ -511,86 +513,20 @@ impl MeshApi {
         build_runtime_processes_payload(local_processes)
     }
 
-    async fn status(&self) -> StatusPayload {
-        // Snapshot inner fields and drop the lock before any async node queries.
-        // This prevents deadlock: if node.peers() etc. block on node.state.lock(),
-        // we don't hold inner.lock() hostage, so other handlers can still proceed.
-        let (
-            node,
-            node_id,
-            token,
-            my_vram_gb,
-            inflight_requests,
-            routing_affinity,
-            model_name,
-            model_size_bytes,
-            llama_ready,
-            is_host,
-            is_client,
-            api_port,
-            draft_name,
-            mesh_name,
-            latest_version,
-            nostr_discovery,
-            local_scan,
-            local_processes,
-            inventory_cache_progress,
-        ) = {
+    async fn mesh_models(&self) -> Vec<MeshModelPayload> {
+        let (node, my_vram_gb, model_name, model_size_bytes, local_processes) = {
             let inner = self.inner.lock().await;
             (
                 inner.node.clone(),
-                inner.node.id().fmt_short().to_string(),
-                inner.node.invite_token(),
                 inner.node.vram_bytes() as f64 / 1e9,
-                inner.node.inflight_requests(),
-                inner.affinity_router.stats_snapshot(),
                 inner.model_name.clone(),
                 inner.model_size_bytes,
-                inner.llama_ready,
-                inner.is_host,
-                inner.is_client,
-                inner.api_port,
-                inner.draft_name.clone(),
-                inner.mesh_name.clone(),
-                inner.latest_version.clone(),
-                inner.nostr_discovery,
-                inner.cached_inventory.clone(),
                 inner.local_processes.clone(),
-                inner.inventory_cache_progress,
             )
-        }; // inner lock dropped here
+        };
 
+        let local_scan = self.local_inventory_snapshot().await;
         let all_peers = node.peers().await;
-        let my_models = node.models().await;
-        let my_available_models = node.available_models().await;
-        let my_requested_models = node.requested_models().await;
-        let peers: Vec<PeerPayload> = all_peers
-            .iter()
-            .map(|p| PeerPayload {
-                id: p.id.fmt_short().to_string(),
-                role: match p.role {
-                    mesh::NodeRole::Worker => "Worker".into(),
-                    mesh::NodeRole::Host { .. } => "Host".into(),
-                    mesh::NodeRole::Client => "Client".into(),
-                },
-                models: p.models.clone(),
-                available_models: p.available_models.clone(),
-                requested_models: p.requested_models.clone(),
-                vram_gb: p.vram_bytes as f64 / 1e9,
-                serving_models: p.serving_models.clone(),
-                hosted_models: p.hosted_models.clone(),
-                hosted_models_known: p.hosted_models_known,
-                rtt_ms: p.rtt_ms,
-                hostname: p.hostname.clone(),
-                is_soc: p.is_soc,
-                gpus: build_gpus(
-                    p.gpu_name.as_deref(),
-                    p.gpu_vram.as_deref(),
-                    p.gpu_bandwidth_gbps.as_deref(),
-                ),
-            })
-            .collect();
-
         let catalog = node.mesh_catalog_entries().await;
         let served = node.models_being_served().await;
         let active_demand = node.active_demand().await;
@@ -609,10 +545,7 @@ impl MeshApi {
             }
         }
         let my_hosted_models = node.hosted_models().await;
-        let has_local_processes = !local_processes.is_empty();
-        let effective_llama_ready = llama_ready || has_local_processes;
-        let effective_is_host = is_host || has_local_processes;
-        let display_model_name = local_processes
+        let _display_model_name = local_processes
             .first()
             .map(|process| process.name.clone())
             .or_else(|| my_hosted_models.first().cloned())
@@ -622,7 +555,8 @@ impl MeshApi {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mesh_models: Vec<MeshModelPayload> = catalog
+
+        catalog
             .iter()
             .map(|entry| {
                 let name = &entry.model_name;
@@ -716,8 +650,6 @@ impl MeshApi {
                             crate::models::ModelCapabilities::default()
                         }
                     });
-                // Apply the name/description heuristic before deriving any capability
-                // fields so that `reasoning` and `reasoning_status` stay consistent.
                 if local_known
                     && likely_reasoning_model(name, catalog_entry.map(|m| m.description.as_str()))
                 {
@@ -725,7 +657,6 @@ impl MeshApi {
                         .reasoning
                         .max(crate::models::capabilities::CapabilityLevel::Likely);
                 }
-                // Apply vision name heuristic the same way — upgrade before deriving fields.
                 if local_known
                     && likely_vision_model(name, catalog_entry.map(|m| m.description.as_str()))
                 {
@@ -887,7 +818,96 @@ impl MeshApi {
                     auto_command: format!("mesh-llm --auto --model {}", command_ref),
                 }
             })
+            .collect()
+    }
+
+    async fn status(&self) -> StatusPayload {
+        // Snapshot inner fields and drop the lock before any async node queries.
+        // This prevents deadlock: if node.peers() etc. block on node.state.lock(),
+        // we don't hold inner.lock() hostage, so other handlers can still proceed.
+        let (
+            node,
+            node_id,
+            token,
+            my_vram_gb,
+            inflight_requests,
+            routing_affinity,
+            model_name,
+            model_size_bytes,
+            llama_ready,
+            is_host,
+            is_client,
+            api_port,
+            draft_name,
+            mesh_name,
+            latest_version,
+            nostr_discovery,
+            local_processes,
+        ) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.node.clone(),
+                inner.node.id().fmt_short().to_string(),
+                inner.node.invite_token(),
+                inner.node.vram_bytes() as f64 / 1e9,
+                inner.node.inflight_requests(),
+                inner.affinity_router.stats_snapshot(),
+                inner.model_name.clone(),
+                inner.model_size_bytes,
+                inner.llama_ready,
+                inner.is_host,
+                inner.is_client,
+                inner.api_port,
+                inner.draft_name.clone(),
+                inner.mesh_name.clone(),
+                inner.latest_version.clone(),
+                inner.nostr_discovery,
+                inner.local_processes.clone(),
+            )
+        }; // inner lock dropped here
+
+        let all_peers = node.peers().await;
+        let my_models = node.models().await;
+        let my_available_models = node.available_models().await;
+        let my_requested_models = node.requested_models().await;
+        let peers: Vec<PeerPayload> = all_peers
+            .iter()
+            .map(|p| PeerPayload {
+                id: p.id.fmt_short().to_string(),
+                role: match p.role {
+                    mesh::NodeRole::Worker => "Worker".into(),
+                    mesh::NodeRole::Host { .. } => "Host".into(),
+                    mesh::NodeRole::Client => "Client".into(),
+                },
+                models: p.models.clone(),
+                available_models: p.available_models.clone(),
+                requested_models: p.requested_models.clone(),
+                vram_gb: p.vram_bytes as f64 / 1e9,
+                serving_models: p.serving_models.clone(),
+                hosted_models: p.hosted_models.clone(),
+                hosted_models_known: p.hosted_models_known,
+                rtt_ms: p.rtt_ms,
+                hostname: p.hostname.clone(),
+                is_soc: p.is_soc,
+                gpus: build_gpus(
+                    p.gpu_name.as_deref(),
+                    p.gpu_vram.as_deref(),
+                    p.gpu_bandwidth_gbps.as_deref(),
+                ),
+            })
             .collect();
+
+        let my_serving_models = node.serving_models().await;
+        let my_hosted_models = node.hosted_models().await;
+        let has_local_processes = !local_processes.is_empty();
+        let effective_llama_ready = llama_ready || has_local_processes;
+        let effective_is_host = is_host || has_local_processes;
+        let display_model_name = local_processes
+            .first()
+            .map(|process| process.name.clone())
+            .or_else(|| my_hosted_models.first().cloned())
+            .or_else(|| my_serving_models.first().cloned())
+            .unwrap_or_else(|| model_name.clone());
 
         let (launch_pi, launch_goose) = if effective_llama_ready {
             (
@@ -947,7 +967,6 @@ impl MeshApi {
             peers,
             launch_pi,
             launch_goose,
-            mesh_models,
             inflight_requests,
             mesh_id,
             mesh_name,
@@ -969,7 +988,6 @@ impl MeshApi {
                 )
             },
             routing_affinity,
-            inventory_cache_progress,
         }
     }
 
@@ -1065,13 +1083,6 @@ pub async fn start(
             inner.latest_version = Some(latest);
         }
         state5.push_status().await;
-    });
-
-    // Populate the inventory cache eagerly in the background so `status()` never performs
-    // blocking filesystem/GGUF reads inline.
-    let state6 = state.clone();
-    tokio::spawn(async move {
-        state6.refresh_inventory_cache().await;
     });
 
     let addr = if listen_all { "0.0.0.0" } else { "127.0.0.1" };
@@ -1177,6 +1188,20 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
                 }
                 Err(_) => {
                     respond_error(&mut stream, 503, "Status temporarily unavailable").await?;
+                }
+            }
+        }
+
+        ("GET", "/api/models") => {
+            match tokio::time::timeout(std::time::Duration::from_secs(60), state.mesh_models())
+                .await
+            {
+                Ok(mesh_models) => {
+                    respond_json(&mut stream, 200, &ModelsPayload { mesh_models }).await?;
+                }
+                Err(_) => {
+                    respond_error(&mut stream, 503, "Model catalog temporarily unavailable")
+                        .await?;
                 }
             }
         }

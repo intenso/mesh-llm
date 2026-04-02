@@ -2,6 +2,7 @@ use hf_hub::cache::CacheInfo;
 use hf_hub::Cache;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -79,8 +80,46 @@ pub fn legacy_models_present() -> bool {
     tree_contains_gguf(&legacy_dir)
 }
 
-pub fn huggingface_identity_for_path(path: &Path) -> Option<HuggingFaceModelIdentity> {
-    let cache = huggingface_hub_cache();
+fn parse_model_repo_folder_name(folder: &str) -> Option<String> {
+    folder
+        .strip_prefix("models--")
+        .map(|value| value.replace("--", "/"))
+}
+
+fn identity_from_cache_snapshot_path(
+    path: &Path,
+    cache_root: &Path,
+) -> Option<HuggingFaceModelIdentity> {
+    let relative = path.strip_prefix(cache_root).ok()?;
+    let mut components = relative.components();
+    let repo_folder = components.next()?.as_os_str().to_str()?;
+    let repo_id = parse_model_repo_folder_name(repo_folder)?;
+    if components.next()?.as_os_str() != OsStr::new("snapshots") {
+        return None;
+    }
+    let revision = components.next()?.as_os_str().to_str()?.to_string();
+    let relative_file = components
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?
+        .join("/");
+    if relative_file.is_empty() {
+        return None;
+    }
+    let local_file_name = Path::new(&relative_file)
+        .file_name()
+        .and_then(|value| value.to_str())?
+        .to_string();
+    let canonical_ref = format!("{repo_id}@{revision}/{relative_file}");
+    Some(HuggingFaceModelIdentity {
+        repo_id,
+        revision,
+        file: relative_file,
+        canonical_ref,
+        local_file_name,
+    })
+}
+
+fn scan_hf_cache_identity_for_path(path: &Path, cache: &Cache) -> Option<HuggingFaceModelIdentity> {
     let cache_info = CacheInfo::scan_dir(Some(cache.path())).ok()?;
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
@@ -126,6 +165,36 @@ pub fn huggingface_identity_for_path(path: &Path) -> Option<HuggingFaceModelIden
     }
 
     None
+}
+
+pub fn huggingface_identity_for_path(path: &Path) -> Option<HuggingFaceModelIdentity> {
+    let cache = huggingface_hub_cache();
+    let cache_root = cache.path();
+    if let Some(identity) = identity_from_cache_snapshot_path(path, cache_root) {
+        return Some(identity);
+    }
+    let resolved_cache_root = cache_root
+        .canonicalize()
+        .unwrap_or_else(|_| cache_root.clone());
+    if resolved_cache_root != *cache_root {
+        if let Some(identity) = identity_from_cache_snapshot_path(path, &resolved_cache_root) {
+            return Some(identity);
+        }
+    }
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if resolved != path {
+        if let Some(identity) = identity_from_cache_snapshot_path(&resolved, cache_root) {
+            return Some(identity);
+        }
+        if resolved_cache_root != *cache_root {
+            if let Some(identity) =
+                identity_from_cache_snapshot_path(&resolved, &resolved_cache_root)
+            {
+                return Some(identity);
+            }
+        }
+    }
+    scan_hf_cache_identity_for_path(path, &cache)
 }
 
 pub fn exact_model_source_for_path(path: &Path) -> Option<String> {
@@ -471,6 +540,52 @@ mod tests {
         assert_eq!(split_gguf_base_name("Qwen3-8B-Q4_K_M"), None);
         assert_eq!(split_gguf_base_name("model-001-of-003"), None);
         assert_eq!(split_gguf_base_name("model-00001-of-00003"), Some("model"));
+    }
+
+    #[test]
+    #[serial]
+    fn huggingface_identity_for_path_parses_snapshot_path_directly() {
+        let prev_hub_cache = std::env::var_os("HF_HUB_CACHE");
+        let prev_hf_home = std::env::var_os("HF_HOME");
+        let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
+
+        let temp = std::env::temp_dir().join(format!(
+            "mesh-llm-hf-identity-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let snapshot_path = temp
+            .join("models--bartowski--Llama-3.2-1B-Instruct-GGUF")
+            .join("snapshots")
+            .join("abcdef1234567890")
+            .join("nested")
+            .join("Llama-3.2-1B-Instruct-Q4_K_M.gguf");
+        std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
+        std::fs::write(&snapshot_path, b"gguf").unwrap();
+
+        std::env::set_var("HF_HUB_CACHE", &temp);
+        std::env::remove_var("HF_HOME");
+        std::env::remove_var("XDG_CACHE_HOME");
+
+        let identity = huggingface_identity_for_path(&snapshot_path).unwrap();
+        assert_eq!(identity.repo_id, "bartowski/Llama-3.2-1B-Instruct-GGUF");
+        assert_eq!(identity.revision, "abcdef1234567890");
+        assert_eq!(identity.file, "nested/Llama-3.2-1B-Instruct-Q4_K_M.gguf");
+        assert_eq!(
+            identity.canonical_ref,
+            "bartowski/Llama-3.2-1B-Instruct-GGUF@abcdef1234567890/nested/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+        );
+        assert_eq!(
+            identity.local_file_name,
+            "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+        restore_env("HF_HUB_CACHE", prev_hub_cache);
+        restore_env("HF_HOME", prev_hf_home);
+        restore_env("XDG_CACHE_HOME", prev_xdg);
     }
 
     fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
