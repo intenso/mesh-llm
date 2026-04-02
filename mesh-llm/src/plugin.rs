@@ -1,3 +1,5 @@
+mod config;
+
 use anyhow::{anyhow, bail, Context, Result};
 pub use mesh_llm_plugin::proto;
 use mesh_llm_plugin::{MeshVisibility, STARTUP_DISABLED_ERROR_CODE};
@@ -7,10 +9,10 @@ use rmcp::model::{
     CallToolResult as McpCallToolResult, ErrorCode, InitializeRequestParams, ListToolsResult,
     PaginatedRequestParams, ServerInfo,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -18,54 +20,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+pub use self::config::{
+    config_path, load_config, resolve_plugins, ExternalPluginSpec, PluginHostMode, ResolvedPlugins,
+};
+
 pub const BLACKBOARD_PLUGIN_ID: &str = "blackboard";
 pub(crate) const PROTOCOL_VERSION: u32 = mesh_llm_plugin::PROTOCOL_VERSION;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 15;
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct MeshConfig {
-    #[serde(default)]
-    pub self_update: Option<bool>,
-    #[serde(rename = "plugin", default)]
-    pub plugins: Vec<PluginConfigEntry>,
-}
-
-impl MeshConfig {
-    pub fn self_update_enabled(&self) -> bool {
-        self.self_update.unwrap_or(true)
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct PluginConfigEntry {
-    pub name: String,
-    #[serde(default)]
-    pub enabled: Option<bool>,
-    #[serde(default)]
-    pub command: Option<String>,
-    #[serde(default)]
-    pub args: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ResolvedPlugins {
-    pub externals: Vec<ExternalPluginSpec>,
-    pub inactive: Vec<PluginSummary>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ExternalPluginSpec {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct PluginHostMode {
-    pub mesh_visibility: MeshVisibility,
-}
 
 #[derive(Clone, Debug)]
 pub enum PluginMeshEvent {
@@ -179,83 +142,6 @@ enum LocalListener {
     Unix(tokio::net::UnixListener, PathBuf),
     #[cfg(windows)]
     Pipe(String, tokio::net::windows::named_pipe::NamedPipeServer),
-}
-
-pub fn config_path(override_path: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = override_path {
-        return Ok(path.to_path_buf());
-    }
-    if let Ok(path) = std::env::var("MESH_LLM_CONFIG") {
-        return Ok(PathBuf::from(path));
-    }
-    let home = dirs::home_dir().context("Cannot determine home directory")?;
-    Ok(home.join(".mesh-llm").join("config.toml"))
-}
-
-pub fn load_config(override_path: Option<&Path>) -> Result<MeshConfig> {
-    let path = config_path(override_path)?;
-    if !path.exists() {
-        return Ok(MeshConfig::default());
-    }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read config {}", path.display()))?;
-    toml::from_str(&raw).with_context(|| format!("Failed to parse config {}", path.display()))
-}
-
-pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Result<ResolvedPlugins> {
-    let mut externals = Vec::new();
-    let inactive = Vec::new();
-    let mut names = BTreeMap::<String, ()>::new();
-    let mut blackboard_enabled = true;
-    for entry in &config.plugins {
-        if names.insert(entry.name.clone(), ()).is_some() {
-            bail!("Duplicate plugin entry '{}'", entry.name);
-        }
-        let enabled = entry.enabled.unwrap_or(true);
-        if entry.name == BLACKBOARD_PLUGIN_ID {
-            if entry.command.is_some() || !entry.args.is_empty() {
-                bail!(
-                    "Plugin '{}' is served by mesh-llm itself; only `enabled` may be set",
-                    BLACKBOARD_PLUGIN_ID
-                );
-            }
-            blackboard_enabled = enabled;
-            continue;
-        }
-        if !enabled {
-            continue;
-        }
-        let command = entry
-            .command
-            .clone()
-            .with_context(|| format!("Plugin '{}' is enabled but missing command", entry.name))?;
-        externals.push(ExternalPluginSpec {
-            name: entry.name.clone(),
-            command,
-            args: entry.args.clone(),
-        });
-    }
-
-    if blackboard_enabled {
-        externals.insert(0, blackboard_plugin_spec()?);
-    }
-
-    Ok(ResolvedPlugins {
-        externals,
-        inactive,
-    })
-}
-
-pub fn blackboard_plugin_spec() -> Result<ExternalPluginSpec> {
-    let command = std::env::current_exe()
-        .context("Cannot determine mesh-llm executable path")?
-        .display()
-        .to_string();
-    Ok(ExternalPluginSpec {
-        name: BLACKBOARD_PLUGIN_ID.to_string(),
-        command,
-        args: vec!["--plugin".into(), BLACKBOARD_PLUGIN_ID.into()],
-    })
 }
 
 impl PluginManager {
@@ -1496,6 +1382,7 @@ fn proto_mesh_visibility(mesh_visibility: MeshVisibility) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use super::config::{MeshConfig, PluginConfigEntry};
     use super::*;
 
     fn private_host_mode() -> PluginHostMode {
