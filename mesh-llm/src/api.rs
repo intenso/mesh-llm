@@ -779,7 +779,9 @@ impl MeshApi {
                         .and_then(source_page_url_from_identity)
                         .or_else(|| {
                             if local_known {
-                                catalog_entry.and_then(|m| m.source_page_url())
+                                catalog_entry.and_then(|m| {
+                                    crate::models::catalog::huggingface_repo_url(&m.url)
+                                })
                             } else {
                                 None
                             }
