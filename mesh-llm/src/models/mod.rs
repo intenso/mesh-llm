@@ -3,10 +3,10 @@ pub mod catalog;
 pub mod gguf;
 pub mod inventory;
 pub mod local;
-pub mod search;
-pub mod topology;
 mod maintenance;
 mod resolve;
+pub mod search;
+pub mod topology;
 mod warnings;
 
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use hf_hub::api::tokio::{Api as TokioApi, ApiBuilder as TokioApiBuilder};
 pub use capabilities::{CapabilityLevel, ModelCapabilities};
 pub use inventory::{scan_local_inventory_snapshot_with_progress, LocalModelInventorySnapshot};
 pub use local::{
-    exact_model_source_for_path, find_model_path, huggingface_hub_cache, huggingface_hub_cache_dir,
+    find_model_path, huggingface_hub_cache, huggingface_hub_cache_dir,
     huggingface_identity_for_path, legacy_models_dir, legacy_models_present, model_dirs,
     path_is_in_legacy_models_dir, scan_installed_models, scan_local_models,
 };

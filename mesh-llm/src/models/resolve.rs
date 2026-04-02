@@ -1,20 +1,7 @@
 use super::ModelCapabilities;
-use super::{capabilities, catalog, find_model_path, format_size_bytes, hf_token_override};
-use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use super::{capabilities, catalog, find_model_path, format_size_bytes};
+use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
-
-#[derive(Clone, Debug)]
-pub struct SearchHit {
-    pub repo_id: String,
-    pub file: String,
-    pub exact_ref: String,
-    pub size_label: Option<String>,
-    pub downloads: Option<u64>,
-    pub likes: Option<u64>,
-    pub catalog: Option<&'static catalog::CatalogModel>,
-    pub capabilities: ModelCapabilities,
-}
 
 #[derive(Clone, Debug)]
 pub struct ModelDetails {
@@ -43,29 +30,10 @@ enum ExactModelRef {
     },
 }
 
-#[derive(Debug, Deserialize)]
-struct HuggingFaceRepoSummary {
-    id: String,
-    downloads: Option<u64>,
-    likes: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HuggingFaceRepoDetail {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default, rename = "modelId")]
-    model_id: Option<String>,
-    #[serde(default)]
-    siblings: Vec<HuggingFaceSibling>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HuggingFaceSibling {
-    rfilename: String,
-}
-
-pub(super) fn merge_capabilities(left: ModelCapabilities, right: ModelCapabilities) -> ModelCapabilities {
+pub(super) fn merge_capabilities(
+    left: ModelCapabilities,
+    right: ModelCapabilities,
+) -> ModelCapabilities {
     ModelCapabilities {
         vision: left.vision.max(right.vision),
         reasoning: left.reasoning.max(right.reasoning),
@@ -81,20 +49,6 @@ pub fn find_catalog_model_exact(query: &str) -> Option<&'static catalog::Catalog
             || model.file.to_lowercase() == q
             || model.file.trim_end_matches(".gguf").to_lowercase() == q
     })
-}
-
-pub fn search_catalog_models(query: &str) -> Vec<&'static catalog::CatalogModel> {
-    let q = query.to_lowercase();
-    let mut results: Vec<_> = catalog::MODEL_CATALOG
-        .iter()
-        .filter(|model| {
-            model.name.to_lowercase().contains(&q)
-                || model.file.to_lowercase().contains(&q)
-                || model.description.to_lowercase().contains(&q)
-        })
-        .collect();
-    results.sort_by(|left, right| left.name.cmp(&right.name));
-    results
 }
 
 pub async fn download_exact_ref(input: &str) -> Result<PathBuf> {
@@ -208,105 +162,6 @@ pub async fn show_exact_model(input: &str) -> Result<ModelDetails> {
             })
         }
     }
-}
-
-// Keep search custom for now. `hf-hub` handles cache and file transport well,
-// but it does not expose a Hub search surface in this crate version.
-pub async fn search_huggingface(query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-    let repo_limit = limit.clamp(1, 100);
-    let client = http_client()?;
-    let mut request = client.get("https://huggingface.co/api/models").query(&[
-        ("search", query),
-        ("filter", "gguf"),
-        ("limit", &repo_limit.to_string()),
-    ]);
-    if let Some(token) = hf_token_override() {
-        request = request.bearer_auth(token);
-    }
-    let repos: Vec<HuggingFaceRepoSummary> = request
-        .send()
-        .await
-        .context("Search Hugging Face")?
-        .error_for_status()
-        .context("Hugging Face search failed")?
-        .json()
-        .await
-        .context("Parse Hugging Face search response")?;
-
-    let mut hits = Vec::new();
-    for repo in repos {
-        let mut detail_request =
-            client.get(format!("https://huggingface.co/api/models/{}", repo.id));
-        if let Some(token) = hf_token_override() {
-            detail_request = detail_request.bearer_auth(token);
-        }
-        let detail: HuggingFaceRepoDetail = detail_request
-            .send()
-            .await
-            .with_context(|| format!("Fetch Hugging Face repo {}", repo.id))?
-            .error_for_status()
-            .with_context(|| format!("Hugging Face repo {} returned an error", repo.id))?
-            .json()
-            .await
-            .with_context(|| format!("Parse Hugging Face repo {}", repo.id))?;
-
-        let repo_id = detail.id.or(detail.model_id).unwrap_or(repo.id.clone());
-        let sibling_names: Vec<String> = detail
-            .siblings
-            .iter()
-            .map(|sibling| sibling.rfilename.clone())
-            .collect();
-        let mut files: Vec<String> = detail
-            .siblings
-            .into_iter()
-            .map(|sibling| sibling.rfilename)
-            .filter(|file| file.ends_with(".gguf"))
-            .collect();
-        if files.is_empty() {
-            continue;
-        }
-        files.sort_by(|left, right| {
-            file_preference_score(left)
-                .cmp(&file_preference_score(right))
-                .then_with(|| left.cmp(right))
-        });
-        if let Some(file) = files.into_iter().next() {
-            let catalog = matching_catalog_model_for_huggingface(&repo_id, None, &file);
-            let download_url = huggingface_resolve_url(&repo_id, None, &file);
-            let size_label = match catalog {
-                Some(model) => Some(model.size.to_string()),
-                None => remote_size_label(&download_url).await,
-            };
-            let remote_caps = capabilities::infer_remote_hf_capabilities(
-                &repo_id,
-                None,
-                &file,
-                Some(&sibling_names),
-            )
-            .await;
-            let capabilities = match catalog {
-                Some(model) => {
-                    let base = capabilities::infer_catalog_capabilities(model);
-                    merge_capabilities(base, remote_caps)
-                }
-                None => remote_caps,
-            };
-            hits.push(SearchHit {
-                repo_id: repo_id.clone(),
-                file: file.clone(),
-                exact_ref: format!("{repo_id}/{file}"),
-                size_label,
-                downloads: repo.downloads,
-                likes: repo.likes,
-                catalog,
-                capabilities,
-            });
-            if hits.len() >= limit {
-                return Ok(hits);
-            }
-        }
-    }
-    Ok(hits)
 }
 
 pub fn installed_model_capabilities(model_name: &str) -> ModelCapabilities {
@@ -577,24 +432,20 @@ pub(super) fn file_preference_score(file: &str) -> usize {
         .unwrap_or(PREFERRED.len() + 1)
 }
 
-pub(super) fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+async fn remote_size_label(url: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .connect_timeout(std::time::Duration::from_secs(30))
         .user_agent(format!("mesh-llm/{}", crate::VERSION))
         .build()
-        .context("Build HTTP client")
-}
-
-async fn remote_size_label(url: &str) -> Option<String> {
-    let client = http_client().ok()?;
-    let mut request = client.head(url);
-    if url.contains("huggingface.co/") {
-        if let Some(token) = hf_token_override() {
-            request = request.bearer_auth(token);
-        }
-    }
-    let response = request.send().await.ok()?.error_for_status().ok()?;
+        .ok()?;
+    let response = client
+        .head(url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
     let size = response
         .headers()
         .get(reqwest::header::CONTENT_LENGTH)?

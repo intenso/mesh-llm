@@ -1489,10 +1489,12 @@ impl Node {
 
     pub async fn set_model_source(&self, source: String) {
         *self.model_source.lock().await = Some(source);
+        self.refresh_served_model_descriptors().await;
     }
 
     pub async fn set_serving_models(&self, models: Vec<String>) {
         *self.serving_models.lock().await = models;
+        self.refresh_served_model_descriptors().await;
     }
 
     pub async fn set_served_model_descriptors(&self, descriptors: Vec<ServedModelDescriptor>) {
@@ -1509,6 +1511,23 @@ impl Node {
 
     pub async fn hosted_models(&self) -> Vec<String> {
         self.hosted_models.lock().await.clone()
+    }
+
+    async fn refresh_served_model_descriptors(&self) {
+        let serving_models = self.serving_models.lock().await.clone();
+        let descriptors = if let Some(primary_model_name) = serving_models.first() {
+            let model_source = self.model_source.lock().await.clone();
+            let primary_model_path = crate::models::find_model_path(primary_model_name);
+            infer_served_model_descriptors(
+                primary_model_name,
+                &serving_models,
+                model_source.as_deref(),
+                Some(primary_model_path.as_path()),
+            )
+        } else {
+            Vec::new()
+        };
+        self.set_served_model_descriptors(descriptors).await;
     }
 
     /// Set the display name for blackboard posts.
