@@ -26,7 +26,10 @@ use tokio::sync::{watch, Mutex};
 static CONSOLE_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 const MESH_LLM_VERSION: &str = crate::VERSION;
 /// How often (in seconds) to refresh the local model inventory cache.
-const INVENTORY_CACHE_REFRESH_SECS: u64 = 60;
+/// The inventory scan uses CacheInfo for HF cache files but still performs
+/// GGUF metadata reads on first encounter. Keep this high enough to avoid
+/// sustained background IO on large installs.
+const INVENTORY_CACHE_REFRESH_SECS: u64 = 300;
 
 // ── Shared state ──
 
@@ -248,7 +251,7 @@ struct MeshModelPayload {
     auto_command: String,
 }
 
-fn find_catalog_model<'a>(name: &str) -> Option<&'a crate::models::catalog::CatalogModel> {
+fn find_catalog_model(name: &str) -> Option<&'static crate::models::catalog::CatalogModel> {
     crate::models::catalog::MODEL_CATALOG
         .iter()
         .find(|m| m.name == name || m.file.strip_suffix(".gguf").unwrap_or(m.file.as_str()) == name)
@@ -602,7 +605,7 @@ impl MeshApi {
                 let local_known = local_model_names.contains(name)
                     || my_hosted_models.iter().any(|s| s == name)
                     || my_serving_models.iter().any(|s| s == name)
-                    || *name == model_name;
+                    || name == &model_name;
                 let display_name = crate::models::installed_model_display_name(name);
                 let node_count = if is_warm {
                     let peer_count = all_peers.iter().filter(|p| p.routes_model(name)).count();
@@ -657,7 +660,7 @@ impl MeshApi {
                 } else {
                     0.0
                 };
-                let size_gb = if *name == model_name && model_size_bytes > 0 {
+                let size_gb = if name == &model_name && model_size_bytes > 0 {
                     model_size_bytes as f64 / 1e9
                 } else {
                     size_by_name
@@ -692,6 +695,14 @@ impl MeshApi {
                 {
                     capabilities.reasoning = capabilities
                         .reasoning
+                        .max(crate::models::capabilities::CapabilityLevel::Likely);
+                }
+                // Apply vision name heuristic the same way — upgrade before deriving fields.
+                if local_known
+                    && likely_vision_model(name, catalog_entry.map(|m| m.description.as_str()))
+                {
+                    capabilities.vision = capabilities
+                        .vision
                         .max(crate::models::capabilities::CapabilityLevel::Likely);
                 }
                 let vision = capabilities.supports_vision_runtime();
@@ -729,9 +740,11 @@ impl MeshApi {
                     .map(str::to_string)
                     .or_else(|| {
                         catalog_entry.map(|m| m.file.to_string()).and_then(|file| {
-                            file.strip_suffix(".gguf")
-                                .and_then(|stem| stem.split('-').next_back())
-                                .map(str::to_string)
+                            let quant = file
+                                .strip_suffix(".gguf")
+                                .map(crate::models::inventory::derive_quantization_type)
+                                .filter(|q| !q.is_empty())?;
+                            Some(quant)
                         })
                     });
                 let topology_moe = descriptor
