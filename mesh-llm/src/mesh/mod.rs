@@ -810,7 +810,7 @@ const PEER_STALE_SECS: u64 = 180; // 3 minutes
 /// "VRAM" is a misnomer — on macOS unified memory and Linux CPU-only, this
 /// is system RAM. On Linux with a GPU, it's actual GPU VRAM.
 pub fn detect_vram_bytes_capped(max_vram_gb: Option<f64>) -> u64 {
-    let mut detected = crate::hardware::survey().vram_bytes;
+    let mut detected = crate::system::hardware::survey().vram_bytes;
     if let Some(cap) = max_vram_gb {
         let cap_bytes = (cap * 1e9) as u64;
         if cap_bytes < detected {
@@ -1206,7 +1206,7 @@ impl Node {
         let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
         let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
 
-        let hw = crate::hardware::survey();
+        let hw = crate::system::hardware::survey();
         let mut vram = hw.vram_bytes;
         let gpu_name = if matches!(role, NodeRole::Client) {
             None

@@ -1,5 +1,5 @@
 use super::super::{http::respond_error, MeshApi};
-use crate::nostr;
+use crate::network::nostr;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 

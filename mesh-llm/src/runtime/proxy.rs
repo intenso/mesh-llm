@@ -1,4 +1,7 @@
-use crate::{affinity, api, election, mesh, pipeline, proxy, router};
+use crate::api;
+use crate::inference::{election, pipeline};
+use crate::mesh;
+use crate::network::{affinity, proxy, router};
 
 /// Model-aware API proxy. Parses the "model" field from POST request bodies
 /// and routes to the correct host. Falls back to the first available target

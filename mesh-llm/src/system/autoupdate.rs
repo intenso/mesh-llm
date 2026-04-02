@@ -6,7 +6,9 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::{cli::Cli, launch, plugin, VERSION};
+use crate::cli::Cli;
+use crate::inference::launch;
+use crate::{plugin, VERSION};
 
 const DEFAULT_RELEASE_REPO: &str = "michaelneale/mesh-llm";
 #[cfg(not(windows))]

@@ -1,11 +1,11 @@
 use crate::cli::models::ModelsCommand;
-use crate::hardware;
 use crate::models::{
     capabilities, catalog, download_exact_ref, find_catalog_model_exact, huggingface_hub_cache_dir,
     installed_model_capabilities, legacy_models_dir, legacy_models_present,
     path_is_in_legacy_models_dir, scan_installed_models, search_catalog_models, search_huggingface,
     show_exact_model, SearchProgress,
 };
+use crate::system::hardware;
 use anyhow::{anyhow, Result};
 use std::io::Write;
 

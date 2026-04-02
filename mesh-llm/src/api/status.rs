@@ -1,5 +1,5 @@
 use super::{RuntimeModelPayload, RuntimeProcessPayload};
-use crate::affinity;
+use crate::network::affinity;
 use serde::Serialize;
 
 #[derive(Serialize)]

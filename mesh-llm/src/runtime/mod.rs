@@ -10,13 +10,16 @@ use self::local::{
     ManagedModelController, RuntimeEvent,
 };
 use self::proxy::{api_proxy, bootstrap_proxy};
+use crate::api;
 use crate::cli::Cli;
+use crate::inference::{election, launch};
+use crate::mesh;
 use crate::mesh::NodeRole;
+use crate::models;
 use crate::models::catalog;
-use crate::{
-    affinity, api, autoupdate, benchmark, election, hardware, launch, mesh, models, nostr, plugin,
-    router, tunnel,
-};
+use crate::network::{affinity, nostr, router, tunnel};
+use crate::plugin;
+use crate::system::{autoupdate, benchmark, hardware};
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use std::collections::HashMap;
@@ -1773,7 +1776,7 @@ async fn run_passive(
                 tracing::info!("Connection from {addr}");
                 let node = node.clone();
                 let affinity = affinity_router.clone();
-                tokio::spawn(crate::proxy::handle_mesh_request(
+                tokio::spawn(crate::network::proxy::handle_mesh_request(
                     node, tcp_stream, true, affinity,
                 ));
             }

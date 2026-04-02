@@ -117,7 +117,7 @@ pub(crate) struct Cli {
 
     /// Override which bundled llama.cpp flavor to use.
     #[arg(long, value_enum)]
-    pub(crate) llama_flavor: Option<crate::launch::BinaryFlavor>,
+    pub(crate) llama_flavor: Option<crate::inference::launch::BinaryFlavor>,
 
     /// Device for rpc-server (e.g. MTL0, CUDA0, HIP0, Vulkan0, CPU).
     #[arg(long, hide = true)]

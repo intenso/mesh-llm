@@ -1,5 +1,8 @@
+use crate::api;
+use crate::inference::{election, launch};
+use crate::mesh;
 use crate::models::catalog;
-use crate::{api, election, launch, mesh, router};
+use crate::network::router;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 

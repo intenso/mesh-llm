@@ -1,4 +1,6 @@
-use crate::{affinity, mesh, plugin};
+use crate::mesh;
+use crate::network::affinity;
+use crate::plugin;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::Mutex;

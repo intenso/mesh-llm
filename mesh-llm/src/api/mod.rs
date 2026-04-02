@@ -31,7 +31,10 @@ use self::status::{
     build_gpus, build_runtime_processes_payload, build_runtime_status_payload, MeshModelPayload,
     PeerPayload, RuntimeProcessesPayload, RuntimeStatusPayload, StatusPayload,
 };
-use crate::{affinity, election, mesh, nostr, plugin, proxy};
+use crate::inference::election;
+use crate::mesh;
+use crate::network::{affinity, nostr, proxy};
+use crate::plugin;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex};
@@ -474,7 +477,9 @@ impl MeshApi {
                     .map(|m| m.architecture.trim())
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
-                let context_length = metadata.map(|m| m.context_length).filter(|value| *value > 0);
+                let context_length = metadata
+                    .map(|m| m.context_length)
+                    .filter(|value| *value > 0);
                 let quantization = metadata
                     .map(|m| m.quantization_type.trim())
                     .filter(|s| !s.is_empty())
@@ -497,7 +502,11 @@ impl MeshApi {
                 let expert_count = topology_moe
                     .map(|moe| moe.expert_count)
                     .or_else(|| metadata.map(|m| m.expert_count).filter(|count| *count > 0))
-                    .or_else(|| catalog_entry.and_then(|m| m.moe.as_ref()).map(|m| m.n_expert));
+                    .or_else(|| {
+                        catalog_entry
+                            .and_then(|m| m.moe.as_ref())
+                            .map(|m| m.n_expert)
+                    });
                 let used_expert_count = topology_moe
                     .map(|moe| moe.used_expert_count)
                     .or_else(|| {
@@ -511,13 +520,18 @@ impl MeshApi {
                             .map(|m| m.n_expert_used)
                     });
                 let draft_model = catalog_entry.and_then(|m| m.draft.clone());
-                let source_page_url = identity.and_then(source_page_url_from_identity).or_else(|| {
-                    if local_known {
-                        catalog_entry.and_then(|m| crate::models::catalog::huggingface_repo_url(&m.url))
-                    } else {
-                        None
-                    }
-                });
+                let source_page_url =
+                    identity
+                        .and_then(source_page_url_from_identity)
+                        .or_else(|| {
+                            if local_known {
+                                catalog_entry.and_then(|m| {
+                                    crate::models::catalog::huggingface_repo_url(&m.url)
+                                })
+                            } else {
+                                None
+                            }
+                        });
                 let source_ref = identity
                     .and_then(huggingface_repository_from_identity)
                     .or_else(|| {
@@ -537,12 +551,14 @@ impl MeshApi {
                     .and_then(|identity| identity.canonical_ref.clone())
                     .or_else(|| {
                         if local_known {
-                            catalog_entry.and_then(|m| match (m.source_repo(), m.source_revision(), m.source_file()) {
-                                (Some(repo), revision, Some(file)) => Some(match revision {
-                                    Some(revision) => format!("{repo}@{revision}/{file}"),
-                                    None => format!("{repo}/{file}"),
-                                }),
-                                _ => None,
+                            catalog_entry.and_then(|m| {
+                                match (m.source_repo(), m.source_revision(), m.source_file()) {
+                                    (Some(repo), revision, Some(file)) => Some(match revision {
+                                        Some(revision) => format!("{repo}@{revision}/{file}"),
+                                        None => format!("{repo}/{file}"),
+                                    }),
+                                    _ => None,
+                                }
                             })
                         } else {
                             None
@@ -553,7 +569,11 @@ impl MeshApi {
                 MeshModelPayload {
                     name: name.clone(),
                     display_name,
-                    status: if is_warm { "warm".into() } else { "cold".into() },
+                    status: if is_warm {
+                        "warm".into()
+                    } else {
+                        "cold".into()
+                    },
                     node_count,
                     mesh_vram_gb,
                     size_gb,
@@ -841,10 +861,10 @@ pub async fn start(
     // One-shot check for newer public release (for UI footer indicator).
     let state5 = state.clone();
     tokio::spawn(async move {
-        let Some(latest) = crate::latest_release_version().await else {
+        let Some(latest) = crate::system::autoupdate::latest_release_version().await else {
             return;
         };
-        if !crate::version_newer(&latest, crate::VERSION) {
+        if !crate::system::autoupdate::version_newer(&latest, crate::VERSION) {
             return;
         }
         {

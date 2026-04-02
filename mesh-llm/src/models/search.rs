@@ -1,8 +1,8 @@
-use super::ModelCapabilities;
 use super::resolve::{
     file_preference_score, matching_catalog_model_for_huggingface, merge_capabilities,
     remote_hf_size_label_with_api,
 };
+use super::ModelCapabilities;
 use super::{build_hf_tokio_api, capabilities, catalog};
 use anyhow::{Context, Result};
 use hf_hub::api::tokio::Api as TokioApi;

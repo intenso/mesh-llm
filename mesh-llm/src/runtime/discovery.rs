@@ -1,5 +1,6 @@
 use crate::cli::Cli;
-use crate::{mesh, nostr, router};
+use crate::mesh;
+use crate::network::{nostr, router};
 use anyhow::{Context, Result};
 
 /// Health probe: try QUIC connect to the mesh's bootstrap node.

@@ -16,7 +16,7 @@ use crate::cli::commands::models::dispatch_models_command;
 use crate::cli::commands::plugin::run_plugin_command;
 use crate::cli::commands::runtime::{dispatch_runtime_command, run_drop, run_load, run_status};
 use crate::cli::{Cli, Command};
-use crate::nostr;
+use crate::network::nostr;
 
 pub(crate) async fn dispatch(cli: &Cli) -> Result<bool> {
     let Some(cmd) = cli.command.as_ref() else {

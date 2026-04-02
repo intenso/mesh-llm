@@ -1,7 +1,9 @@
 use anyhow::Result;
 
-use crate::launch;
-use crate::{mesh, nostr, runtime};
+use crate::inference::launch;
+use crate::mesh;
+use crate::network::nostr;
+use crate::runtime;
 
 pub(crate) async fn run_discover(
     model: Option<String>,
