@@ -1,4 +1,5 @@
-use super::{PluginMeshEvent, PluginRpcBridge, PluginRuntime, PluginSummary, PROTOCOL_VERSION};
+use super::runtime::PluginRuntime;
+use super::{PluginMeshEvent, PluginRpcBridge, PluginSummary, PROTOCOL_VERSION};
 use anyhow::{anyhow, bail, Context, Result};
 use rand::Rng;
 use rmcp::model::ErrorCode;
