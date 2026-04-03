@@ -1446,11 +1446,11 @@ export function App() {
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
-        const normalized = buf.replace(/\r\n/g, "\n");
-        let frameEnd = normalized.indexOf("\n\n");
+        buf = buf.replace(/\r\n/g, "\n");
+        let frameEnd = buf.indexOf("\n\n");
         while (frameEnd >= 0) {
-          const frame = normalized.slice(0, frameEnd);
-          buf = normalized.slice(frameEnd + 2);
+          const frame = buf.slice(0, frameEnd);
+          buf = buf.slice(frameEnd + 2);
           const lines = frame.split("\n");
           let eventName = "";
           const dataLines: string[] = [];

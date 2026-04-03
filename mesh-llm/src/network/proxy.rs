@@ -11,6 +11,7 @@ use crate::network::affinity::{
 use crate::network::router;
 use crate::plugin;
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -840,6 +841,8 @@ async fn resolve_request_object_references(
     };
 
     let mut request_ids = Vec::new();
+    let mut blob_cache: HashMap<String, plugin::blobstore::GetRequestObjectResponse> =
+        HashMap::new();
     for message in messages.iter_mut() {
         let Some(blocks) = message
             .get_mut("content")
@@ -851,14 +854,20 @@ async fn resolve_request_object_references(
             let Some((action, token)) = block_media_ref_action(block) else {
                 continue;
             };
-            let blob = plugin::blobstore::get_request_object(
-                plugin_manager,
-                plugin::blobstore::GetRequestObjectRequest {
-                    token,
-                    request_id: request_id.clone(),
-                },
-            )
-            .await?;
+            let blob = if let Some(cached) = blob_cache.get(&token) {
+                cached.clone()
+            } else {
+                let fetched = plugin::blobstore::get_request_object(
+                    plugin_manager,
+                    plugin::blobstore::GetRequestObjectRequest {
+                        token: token.clone(),
+                        request_id: request_id.clone(),
+                    },
+                )
+                .await?;
+                blob_cache.insert(token.clone(), fetched.clone());
+                fetched
+            };
             if !request_ids
                 .iter()
                 .any(|existing| existing == &blob.request_id)
