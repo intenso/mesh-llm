@@ -337,6 +337,7 @@ pub(crate) enum Command {
         command: PluginCommand,
     },
     /// Benchmark and compare model/runtime strategies.
+    #[command(hide = true)]
     Benchmark {
         #[command(subcommand)]
         command: BenchmarkCommand,
