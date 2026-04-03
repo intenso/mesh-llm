@@ -425,6 +425,7 @@ mod tests {
             experts_summary: None,
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
+            served_model_runtime: vec![],
         }
     }
 
@@ -472,6 +473,7 @@ mod tests {
             experts_summary: None,
             available_model_sizes: HashMap::from([("Qwen".into(), 1234_u64)]),
             served_model_descriptors: vec![],
+            served_model_runtime: vec![],
         };
         let json = serde_json::to_vec(&vec![PeerAnnouncementV0::from(&ann)]).unwrap();
 
@@ -878,6 +880,7 @@ mod tests {
             experts_summary: None,
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
+            served_model_runtime: vec![],
         };
         let json = serde_json::to_vec(&vec![PeerAnnouncementV0::from(&ann)])
             .expect("JSON serialization must succeed");
