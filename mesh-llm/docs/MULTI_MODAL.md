@@ -8,13 +8,7 @@ Current PR scope is the `chat/completions` vertical slice plus blob/object trans
 
 Next planned build after this PR:
 
-- `POST /v1/responses`
-
-Explicitly deferred beyond this PR:
-
-- `POST /v1/audio/transcriptions`
-- `POST /v1/audio/speech`
-- `v1/realtime`
+- polish and harden the existing multimodal `responses` path where needed
 
 mesh-llm already has part of the foundation:
 
@@ -37,7 +31,9 @@ What is still missing is a complete mesh-llm multimodal contract: capability adv
 
 - Permanent distributed file storage
 - IPFS/libp2p-first design
-- Voice-to-voice parity with OpenAI Realtime on day one
+- `POST /v1/audio/transcriptions`
+- `POST /v1/audio/speech`
+- `v1/realtime`
 - Audio generation from llama alone
 - Native end-to-end video inference on the current llama.cpp path
 
@@ -55,14 +51,6 @@ This is the shortest path because llama.cpp already supports multimodal chat her
 - `POST /v1/responses`
 
 Implement as a mesh-llm compatibility shim after chat completions are solid.
-
-### Optional Later
-
-- `POST /v1/audio/transcriptions`
-- `POST /v1/audio/speech`
-- `v1/realtime`
-
-These should be treated as separate product surfaces, not prerequisites for multimodal chat.
 
 ## Capability Model
 
@@ -294,37 +282,6 @@ We should:
 - prefer upload-and-reference for audio and larger files
 - avoid raising global HTTP body limits as the main solution
 
-## Endpoint-Specific Feasibility
-
-### `/v1/audio/transcriptions`
-
-Feasible as a mesh-llm shim.
-
-Implementation approach:
-
-- accept uploaded audio
-- route to an audio-capable model
-- use a transcription-oriented prompt / template
-- return OpenAI-shaped transcription output
-
-Tradeoff:
-
-- this is prompt-based ASR behavior, not a purpose-built transcription stack
-
-### `/v1/audio/speech`
-
-Not a llama-only feature today.
-
-This requires a separate TTS backend if we want to expose the endpoint.
-
-### `v1/realtime`
-
-Possible only as a mesh-llm shim layer at first:
-
-- websocket/event protocol in mesh-llm
-- llama.cpp still serving underlying chat completion / multimodal input
-- separate STT/TTS components required for full speech-in/speech-out parity
-
 ## Implementation Phases
 
 ## Recommended Build Order
@@ -368,9 +325,6 @@ This is the next planned implementation after the current PR.
 ### Later
 
 - video upload via frame sampling into image inputs
-- `/v1/audio/transcriptions` shim
-- `v1/realtime` shim
-- `/v1/audio/speech` only with a separate TTS backend
 
 ### Phase 1: Capability Plumbing
 
@@ -402,12 +356,9 @@ This is the next planned implementation after the current PR.
 ### Phase 5: Compatibility Shims
 
 - `/v1/responses`
-- optional `/v1/audio/transcriptions`
-- optional `v1/realtime`
 
 ### Phase 6: Optional Extended Backends
 
-- TTS backend for `/v1/audio/speech`
 - video ingestion and frame sampling pipeline
 - richer persistent asset handling if we ever want reusable attachments
 
