@@ -1018,7 +1018,7 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
     #[test]
     fn test_build_gpus_both_none() {
@@ -1235,7 +1235,7 @@ mod tests {
         assert_eq!(decode_runtime_model_path("/api/runtime/models/%80"), None);
     }
 
-    async fn build_test_mesh_api() -> MeshApi {
+    async fn build_test_mesh_api_with_api_port(api_port: u16) -> MeshApi {
         let node = mesh::Node::new_for_tests(mesh::NodeRole::Worker)
             .await
             .unwrap();
@@ -1256,11 +1256,15 @@ mod tests {
         MeshApi::new(
             node,
             "test-model".to_string(),
-            3131,
+            api_port,
             0,
             plugin_manager,
             affinity::AffinityRouter::default(),
         )
+    }
+
+    async fn build_test_mesh_api() -> MeshApi {
+        build_test_mesh_api_with_api_port(3131).await
     }
 
     async fn spawn_management_test_server(
@@ -1276,6 +1280,29 @@ mod tests {
             handle_request(stream, &state).await
         });
         (addr, handle)
+    }
+
+    async fn spawn_capturing_upstream(
+        response_body: &str,
+    ) -> (u16, oneshot::Receiver<Vec<u8>>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = response_body.to_string();
+        let (request_tx, request_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = proxy::read_http_request(&mut stream).await.unwrap();
+            let _ = request_tx.send(request.raw);
+
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+            let _ = stream.shutdown().await;
+        });
+        (port, request_rx, handle)
     }
 
     fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -1374,5 +1401,97 @@ mod tests {
 
         drop(stream);
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_api_chat_smoke_for_image_request() {
+        let (upstream_port, upstream_rx, upstream_handle) =
+            spawn_capturing_upstream(r#"{"ok":true}"#).await;
+        let state = build_test_mesh_api_with_api_port(upstream_port).await;
+        state.update(true, true).await;
+        let (addr, handle) = spawn_management_test_server(state).await;
+
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe this image"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}}
+                ]
+            }],
+            "stream": false
+        })
+        .to_string();
+        let request = format!(
+            "POST /api/chat HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let response_text = String::from_utf8(response).unwrap();
+        let raw = String::from_utf8(upstream_rx.await.unwrap()).unwrap();
+
+        assert!(response_text.starts_with("HTTP/1.1 200 OK"));
+        assert!(raw.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(raw.contains(r#""type":"image_url""#));
+        assert!(raw.contains("data:image/png;base64,aGVsbG8="));
+
+        handle.abort();
+        let _ = upstream_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_chat_smoke_for_audio_request() {
+        let (upstream_port, upstream_rx, upstream_handle) =
+            spawn_capturing_upstream(r#"{"ok":true}"#).await;
+        let state = build_test_mesh_api_with_api_port(upstream_port).await;
+        state.update(true, true).await;
+        let (addr, handle) = spawn_management_test_server(state).await;
+
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "transcribe this audio"},
+                    {"type": "input_audio", "input_audio": {
+                        "data": "UklGRg==",
+                        "format": "wav",
+                        "mime_type": "audio/wav"
+                    }}
+                ]
+            }],
+            "stream": false
+        })
+        .to_string();
+        let request = format!(
+            "POST /api/chat HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let response_text = String::from_utf8(response).unwrap();
+        let raw = String::from_utf8(upstream_rx.await.unwrap()).unwrap();
+
+        assert!(response_text.starts_with("HTTP/1.1 200 OK"));
+        assert!(raw.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(raw.contains(r#""type":"input_audio""#));
+        assert!(raw.contains(r#""data":"UklGRg==""#));
+        assert!(raw.contains(r#""format":"wav""#));
+        assert!(raw.contains(r#""mime_type":"audio/wav""#));
+
+        handle.abort();
+        let _ = upstream_handle.await;
     }
 }

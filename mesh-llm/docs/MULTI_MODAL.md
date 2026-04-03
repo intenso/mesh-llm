@@ -4,6 +4,18 @@
 
 Design proposal.
 
+Current PR scope is the `chat/completions` vertical slice plus blob/object transport and console attachment support.
+
+Next planned build after this PR:
+
+- `POST /v1/responses`
+
+Explicitly deferred beyond this PR:
+
+- `POST /v1/audio/transcriptions`
+- `POST /v1/audio/speech`
+- `v1/realtime`
+
 mesh-llm already has part of the foundation:
 
 - vision capability inference
@@ -27,6 +39,7 @@ What is still missing is a complete mesh-llm multimodal contract: capability adv
 - IPFS/libp2p-first design
 - Voice-to-voice parity with OpenAI Realtime on day one
 - Audio generation from llama alone
+- Native end-to-end video inference on the current llama.cpp path
 
 ## API Targets
 
@@ -97,6 +110,8 @@ Accept and preserve OpenAI-style content parts:
 - audio URL / data URL
 - future file-style references
 
+Video is not a Phase 1 request shape target. Treat video separately from image/audio until the serving stack can handle it natively.
+
 mesh-llm should detect multimodal intent from structured content blocks, not just text keywords.
 
 ### Responses API
@@ -115,6 +130,36 @@ Add a translation layer from `responses` input items into chat-completions-style
   - audio-capable hosts for audio inputs
   - models supporting both when both are present
 - Skip or constrain the pre-plan pipeline for requests containing media until the planner path is multimodal-safe.
+
+## Video Support
+
+Some model families support video at the model level, but that should not be treated as available in mesh-llm yet.
+
+Current working assumption:
+
+- open multimodal models with video support exist
+- the current llama.cpp integration path in mesh-llm should be treated as image/audio only
+- native video input should stay out of scope until upstream serving support is real and reliable
+
+Recommended first implementation path for video:
+
+- accept uploaded video into the same request-scoped blob plugin
+- decode and sample frames server-side
+- send sampled frames as ordered image inputs to a vision-capable model
+- optionally include timestamp metadata in the prompt or content structure
+
+Why this path first:
+
+- it reuses the existing blob/object lifecycle
+- it works with current image-capable serving paths
+- it avoids blocking on native video support in llama.cpp
+
+Follow-up requirements when we do video:
+
+- add `video` capability metadata only when there is a real serving path behind it
+- define upload limits, codec/container acceptance, and frame-sampling defaults
+- decide whether video should be exposed only through `responses`, through `chat/completions`, or both
+- make it explicit in the UI when video is being converted into sampled images rather than handled natively
 
 ## Media Transport Plan
 
@@ -235,6 +280,7 @@ Recommended first-pass behavior:
 - paste image support
 - microphone capture for audio input
 - waveform / duration preview for audio
+- video upload once there is either frame-sampling support or native serving support
 - richer attachment rendering in the transcript
 - attachment reuse inside the same conversation only if we later decide to support longer-lived object leases
 
@@ -317,8 +363,11 @@ Scope:
 
 Add multimodal `/v1/responses` compatibility.
 
+This is the next planned implementation after the current PR.
+
 ### Later
 
+- video upload via frame sampling into image inputs
 - `/v1/audio/transcriptions` shim
 - `v1/realtime` shim
 - `/v1/audio/speech` only with a separate TTS backend
@@ -359,6 +408,7 @@ Add multimodal `/v1/responses` compatibility.
 ### Phase 6: Optional Extended Backends
 
 - TTS backend for `/v1/audio/speech`
+- video ingestion and frame sampling pipeline
 - richer persistent asset handling if we ever want reusable attachments
 
 ## Open Questions
@@ -368,3 +418,4 @@ Add multimodal `/v1/responses` compatibility.
 - whether `responses` should become the primary public API once parity is good enough
 - whether multimodal requests should always disable pre-plan, or only for audio
 - whether plugin-host fetches should flow through the existing mesh transport or a dedicated plugin RPC path
+- when to introduce a real `video` capability instead of treating video as a higher-level image sequence workflow

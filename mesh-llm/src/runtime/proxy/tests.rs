@@ -653,6 +653,158 @@ async fn test_api_proxy_rewrites_input_audio_blob_url_to_inline_audio() {
 }
 
 #[tokio::test]
+async fn test_api_proxy_translates_responses_image_request() {
+    let (plugin_manager, blobstore_root) = start_blobstore_plugin_manager().await;
+    let put = plugin::blobstore::put_request_object(
+        &plugin_manager,
+        plugin::blobstore::PutRequestObjectRequest {
+            request_id: "req-responses-image".into(),
+            mime_type: "image/png".into(),
+            file_name: Some("smoke.png".into()),
+            bytes_base64: "aGVsbG8=".into(),
+            expires_in_secs: Some(300),
+            uses_remaining: Some(3),
+        },
+    )
+    .await
+    .unwrap();
+    let client_id = "client-smoke";
+
+    let upstream_response = serde_json::json!({
+        "id": "chatcmpl_image",
+        "object": "chat.completion",
+        "created": 123,
+        "model": "test",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "image ok"},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 2,
+            "total_tokens": 9
+        }
+    })
+    .to_string();
+    let (upstream_port, upstream_rx, upstream_handle) =
+        spawn_capturing_upstream(&upstream_response).await;
+    let (proxy_addr, proxy_handle) = spawn_api_proxy_test_harness_with_plugin_manager(
+        local_targets(&[("test", upstream_port)]),
+        plugin_manager.clone(),
+    )
+    .await;
+
+    let body = json!({
+        "model": "test",
+        "request_id": "req-responses-image",
+        "input": [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "describe this"},
+                {"type": "input_image", "image_url": format!("mesh://blob/{client_id}/{}", put.token)}
+            ]
+        }]
+    })
+    .to_string();
+    let request = format!(
+        "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+
+    let response = send_request_and_read_response(proxy_addr, vec![request.into_bytes()]).await;
+    let raw = String::from_utf8(upstream_rx.await.unwrap()).unwrap();
+    let response_body = response.split("\r\n\r\n").nth(1).unwrap();
+    let response_json: serde_json::Value = serde_json::from_str(response_body).unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(raw.starts_with("POST /v1/chat/completions HTTP/1.1"));
+    assert!(raw.contains(r#""type":"image_url""#));
+    assert!(raw.contains("data:image/png;base64,aGVsbG8="));
+    assert_eq!(response_json["object"], "response");
+    assert_eq!(response_json["output_text"], "image ok");
+
+    proxy_handle.abort();
+    let _ = upstream_handle.await;
+    let _ = std::fs::remove_dir_all(blobstore_root);
+}
+
+#[tokio::test]
+async fn test_api_proxy_translates_responses_audio_request() {
+    let (plugin_manager, blobstore_root) = start_blobstore_plugin_manager().await;
+    let put = plugin::blobstore::put_request_object(
+        &plugin_manager,
+        plugin::blobstore::PutRequestObjectRequest {
+            request_id: "req-responses-audio".into(),
+            mime_type: "audio/wav".into(),
+            file_name: Some("smoke.wav".into()),
+            bytes_base64: "UklGRg==".into(),
+            expires_in_secs: Some(300),
+            uses_remaining: Some(3),
+        },
+    )
+    .await
+    .unwrap();
+    let client_id = "client-smoke";
+
+    let upstream_response = serde_json::json!({
+        "id": "chatcmpl_audio",
+        "object": "chat.completion",
+        "created": 123,
+        "model": "test",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "audio ok"},
+            "finish_reason": "stop"
+        }]
+    })
+    .to_string();
+    let (upstream_port, upstream_rx, upstream_handle) =
+        spawn_capturing_upstream(&upstream_response).await;
+    let (proxy_addr, proxy_handle) = spawn_api_proxy_test_harness_with_plugin_manager(
+        local_targets(&[("test", upstream_port)]),
+        plugin_manager.clone(),
+    )
+    .await;
+
+    let body = json!({
+        "model": "test",
+        "request_id": "req-responses-audio",
+        "input": [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "transcribe this"},
+                {"type": "input_audio", "audio_url": format!("mesh://blob/{client_id}/{}", put.token)}
+            ]
+        }]
+    })
+    .to_string();
+    let request = format!(
+        "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+
+    let response = send_request_and_read_response(proxy_addr, vec![request.into_bytes()]).await;
+    let raw = String::from_utf8(upstream_rx.await.unwrap()).unwrap();
+    let response_body = response.split("\r\n\r\n").nth(1).unwrap();
+    let response_json: serde_json::Value = serde_json::from_str(response_body).unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(raw.starts_with("POST /v1/chat/completions HTTP/1.1"));
+    assert!(raw.contains(r#""type":"input_audio""#));
+    assert!(raw.contains(r#""data":"UklGRg==""#));
+    assert!(raw.contains(r#""format":"wav""#));
+    assert_eq!(response_json["object"], "response");
+    assert_eq!(response_json["output_text"], "audio ok");
+
+    proxy_handle.abort();
+    let _ = upstream_handle.await;
+    let _ = std::fs::remove_dir_all(blobstore_root);
+}
+
+#[tokio::test]
 async fn test_api_proxy_integration_expect_continue() {
     let (upstream_port, upstream_rx, upstream_handle) =
         spawn_capturing_upstream(r#"{"ok":true}"#).await;

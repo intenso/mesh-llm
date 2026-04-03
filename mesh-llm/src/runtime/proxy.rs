@@ -154,7 +154,8 @@ pub(super) async fn api_proxy(
                     let use_pipeline = classification
                         .as_ref()
                         .map(|cl| pipeline::should_pipeline(cl))
-                        .unwrap_or(false);
+                        .unwrap_or(false)
+                        && request.response_adapter == proxy::ResponseAdapter::None;
 
                     if use_pipeline {
                         if let Some(ref strong_name) = effective_model {
@@ -239,6 +240,7 @@ pub(super) async fn api_proxy(
                                 name,
                                 body_json,
                                 &request.raw,
+                                request.response_adapter,
                                 &affinity,
                             )
                             .await;
@@ -254,8 +256,14 @@ pub(super) async fn api_proxy(
                         first_available_target(&targets)
                     };
 
-                    let _ = proxy::route_to_target(node.clone(), tcp_stream, target, &request.raw)
-                        .await;
+                    let _ = proxy::route_to_target(
+                        node.clone(),
+                        tcp_stream,
+                        target,
+                        &request.raw,
+                        request.response_adapter,
+                    )
+                    .await;
                     proxy::release_request_objects(&node, &request.request_object_request_ids)
                         .await;
                 }
