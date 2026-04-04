@@ -2,7 +2,7 @@ pub mod blobstore;
 mod config;
 pub(crate) mod mcp;
 mod runtime;
-mod stapler;
+pub(crate) mod stapler;
 mod support;
 mod transport;
 

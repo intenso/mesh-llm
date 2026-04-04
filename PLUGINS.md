@@ -235,7 +235,7 @@ Plugin authors should not manually implement:
 
 ## External Endpoints
 
-Plugins may also register external service endpoints.
+Plugins may also register service endpoints.
 
 This is a control-plane declaration, not a request proxying requirement.
 
@@ -251,6 +251,11 @@ In this design, a plugin may tell `mesh-llm`:
 
 This keeps heavy data-plane traffic out of plugin IPC.
 
+An endpoint may be either:
+
+- an attached external service discovered or managed by the plugin
+- a plugin-hosted service served by the plugin itself
+
 ### Why Endpoint Registration Exists
 
 Some services already speak a protocol that `mesh-llm` knows how to use.
@@ -259,6 +264,7 @@ Examples:
 
 - a local OpenAI-compatible inference server
 - an external MCP server reachable over stdio, Unix socket, named pipe, or TCP
+- a plugin-hosted inference runtime such as an MLX-backed local server
 
 In these cases, the plugin should not need to proxy all traffic through itself. It should be able to register the service with the host and remain the control-plane owner for:
 
@@ -266,6 +272,8 @@ In these cases, the plugin should not need to proxy all traffic through itself. 
 - lifecycle
 - readiness
 - availability
+
+For plugin-hosted endpoints, the same contract still applies. The only difference is that the plugin is also the owner of the serving endpoint.
 
 ### Endpoint DSL
 
@@ -330,7 +338,12 @@ This means:
 - `mesh-llm` sends `/v1/*` traffic directly to the registered endpoint
 - streaming responses do not pass through the plugin process
 
-This is the preferred model for local or managed OpenAI-compatible inference servers.
+This is the preferred model for:
+
+- attached external OpenAI-compatible inference servers, such as Lemonade
+- plugin-hosted inference servers, such as an MLX runtime plugin serving its own local endpoint
+
+MLX is the canonical example of the plugin-hosted case. It is a better reference than Lemonade for backends where the plugin itself owns lifecycle and serving.
 
 ### MCP Endpoints
 

@@ -151,7 +151,9 @@ Target behavior:
 
 Build real plugins that exercise the design.
 
-The first inference plugin should be a Lemonade endpoint provider plugin.
+The first plugin-hosted inference migration should be the current llama backend.
+
+After that, build an MLX endpoint provider plugin.
 
 After that, build at least one external MCP endpoint plugin.
 
@@ -164,7 +166,11 @@ These plugins should validate:
 - MCP aggregation
 - HTTP binding ergonomics
 
-The Lemonade plugin should take inspiration from the external backend work in [PR #150](https://github.com/michaelneale/mesh-llm/pull/150), but implemented using the new endpoint registration architecture rather than ad hoc `inference/register` notifications in the transport layer.
+The llama pluginization work should move the current local llama-style serving path behind the new plugin-hosted inference endpoint contract.
+
+The MLX plugin should then take inspiration from the in-process inference-server work in [PR #103](https://github.com/michaelneale/mesh-llm/pull/103), but implemented using the new plugin endpoint registration architecture rather than direct built-in runtime ownership in core.
+
+After that, add an attached external inference plugin, with Lemonade as the first target for that mode. That should take inspiration from [PR #150](https://github.com/michaelneale/mesh-llm/pull/150), but implemented using endpoint registration rather than ad hoc `inference/register` notifications in the transport layer.
 
 ### Phase 9: Host-Owned Plugin Crypto API
 
@@ -191,9 +197,10 @@ The best near-term execution order is:
 3. Add manifest-driven MCP.
 4. Add manifest-driven HTTP bindings.
 5. Add endpoint registration and health tracking.
-6. Build the Lemonade endpoint provider plugin.
-7. Migrate blackboard off bespoke core behavior.
-8. Add the host-owned crypto APIs.
+6. Pluginize the llama backend.
+7. Build the MLX endpoint provider plugin.
+8. Migrate blackboard off bespoke core behavior.
+9. Add the host-owned crypto APIs.
 
 ## Test Strategy
 
@@ -230,7 +237,7 @@ Include corner cases such as:
 
 ### Inference Plugin Testing
 
-Use a Lemonade-backed inference plugin to validate inference endpoint registration end to end.
+Use the pluginized llama backend first, then an MLX-backed inference plugin, to validate plugin-hosted inference endpoint registration end to end.
 
 This should validate:
 
@@ -241,9 +248,19 @@ This should validate:
 - endpoint health transitions
 - automatic endpoint recovery
 
-The Lemonade plugin should prove that a plugin can describe an external OpenAI-compatible backend and let `mesh-llm` talk to it directly.
+The pluginized llama backend should prove that the current built-in serving path can move behind the plugin contract without changing the host-facing inference model.
 
-Take implementation cues from [PR #150](https://github.com/michaelneale/mesh-llm/pull/150):
+The MLX plugin should then prove that a second plugin-hosted backend can use the same contract while owning its own runtime behavior.
+
+Take implementation cues from the current llama runtime behavior first, and then from [PR #103](https://github.com/michaelneale/mesh-llm/pull/103):
+
+- plugin-hosted local model serving with llama semantics
+- plugin-hosted local inference serving
+- model discovery from the owned runtime
+- direct routing through the registered endpoint
+- endpoint health and lifecycle management separated from plugin liveness
+
+After that, validate the attached-external-endpoint mode with Lemonade:
 
 - connect to an already-running Lemonade endpoint
 - perform health checks and model discovery
@@ -251,11 +268,15 @@ Take implementation cues from [PR #150](https://github.com/michaelneale/mesh-llm
 - mark the endpoint unavailable on health failure without unloading the plugin
 - restore the endpoint automatically when health returns
 
-If Lemonade is not available locally, keep a fallback test mode with a fake OpenAI-compatible inference server for protocol and routing validation.
+If MLX or Lemonade is not available locally, keep a fallback test mode with a fake OpenAI-compatible inference server for protocol and routing validation.
+
+### Explicit Follow-Up TODOs
+
+- once the llama backend is pluginized, keep MLX aligned to the same plugin-hosted inference endpoint contract
 
 ### Additional Testing Needed
 
-Beyond fake MCP/HTTP servers and the Lemonade provider, we should also test:
+Beyond fake MCP/HTTP servers and the MLX/Lemonade providers, we should also test:
 
 - backward compatibility of the plugin control protocol where required
 - plugin startup and shutdown behavior
