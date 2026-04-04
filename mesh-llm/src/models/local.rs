@@ -401,6 +401,66 @@ fn strip_quant_suffix(stem: &str) -> &str {
     stem
 }
 
+fn is_named_mmproj_match(lower: &str, model_base: &str, model_stem: &str) -> bool {
+    // Try pattern: <model>-mmproj... (model name before mmproj)
+    if let Some((prefix, _)) = lower
+        .split_once("-mmproj")
+        .or_else(|| lower.split_once("_mmproj"))
+    {
+        if model_base.starts_with(prefix) || model_stem.starts_with(prefix) {
+            return true;
+        }
+    }
+    // Try pattern: mmproj-<model>... (model name after mmproj)
+    if let Some(after) = lower
+        .strip_prefix("mmproj-")
+        .or_else(|| lower.strip_prefix("mmproj_"))
+    {
+        let mmproj_model_base = strip_quant_suffix(after);
+        if model_base.starts_with(mmproj_model_base) || mmproj_model_base.starts_with(model_base) {
+            return true;
+        }
+    }
+    false
+}
+
+fn mmproj_precision_variant_key(path: &Path) -> Option<(String, u8)> {
+    let stem = path.file_stem()?.to_str()?.to_ascii_lowercase();
+    let split = stem.rfind(['-', '_'])?;
+    let base = stem[..split].trim_end_matches(['-', '_']).to_string();
+    let precision = &stem[split + 1..];
+    let rank = match precision {
+        "bf16" => 0,
+        "f16" => 1,
+        "f32" => 2,
+        _ => return None,
+    };
+    Some((base, rank))
+}
+
+fn choose_mmproj_candidate(candidates: &[PathBuf]) -> Option<PathBuf> {
+    if candidates.is_empty() {
+        return None;
+    }
+    if candidates.len() == 1 {
+        return Some(candidates[0].clone());
+    }
+
+    let parsed: Vec<_> = candidates
+        .iter()
+        .map(|path| mmproj_precision_variant_key(path).map(|(base, rank)| (path, base, rank)))
+        .collect::<Option<Vec<_>>>()?;
+    let base = &parsed.first()?.1;
+    if parsed.iter().any(|(_, other_base, _)| other_base != base) {
+        return None;
+    }
+
+    parsed
+        .into_iter()
+        .min_by_key(|(_, _, rank)| *rank)
+        .map(|(path, _, _)| path.clone())
+}
+
 pub fn find_mmproj_path(model_name: &str, model_path: &Path) -> Option<PathBuf> {
     if let Some(path) = crate::models::catalog::MODEL_CATALOG
         .iter()
@@ -426,12 +486,10 @@ pub fn find_mmproj_path(model_name: &str, model_path: &Path) -> Option<PathBuf> 
     // This is safe for the HF hub cache because each model lives in its own
     // isolated snapshot subdirectory alongside only its companion files.
     //
-    // The mmproj filename must contain both "mmproj" AND a model-name component
-    // that matches the model being loaded.
-    //
-    // Supported naming patterns:
-    //   <model>-mmproj[-<quant>].gguf   e.g. Qwen3.5-0.8B-mmproj-BF16.gguf
-    //   mmproj-<model>[-<quant>].gguf   e.g. mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf
+    // Preferred resolution order within that exact directory:
+    // 1. model-name-aware mmproj matches
+    // 2. if all remaining mmproj siblings are only precision variants of the
+    //    same projector, prefer BF16 over F16 over F32
     let parent = model_path.parent()?;
     let model_stem = model_path
         .file_stem()
@@ -440,7 +498,7 @@ pub fn find_mmproj_path(model_name: &str, model_path: &Path) -> Option<PathBuf> 
     // Strip the quant suffix from the model stem to get the base model name
     // e.g. "qwen3vl-2b-instruct-q4_k_m" → "qwen3vl-2b-instruct"
     let model_base = strip_quant_suffix(&model_stem);
-    let mut candidates = std::fs::read_dir(parent)
+    let mmproj_siblings: Vec<PathBuf> = std::fs::read_dir(parent)
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -451,40 +509,33 @@ pub fn find_mmproj_path(model_name: &str, model_path: &Path) -> Option<PathBuf> 
                 .and_then(|stem| stem.to_str())
                 .map(|stem| {
                     let lower = stem.to_ascii_lowercase();
-                    if !lower.contains("mmproj") {
-                        return false;
-                    }
-                    // Try pattern: <model>-mmproj... (model name before mmproj)
-                    if let Some((prefix, _)) = lower
-                        .split_once("-mmproj")
-                        .or_else(|| lower.split_once("_mmproj"))
-                    {
-                        if model_base.starts_with(prefix) || model_stem.starts_with(prefix) {
-                            return true;
-                        }
-                    }
-                    // Try pattern: mmproj-<model>... (model name after mmproj)
-                    if let Some(after) = lower
-                        .strip_prefix("mmproj-")
-                        .or_else(|| lower.strip_prefix("mmproj_"))
-                    {
-                        let mmproj_model_base = strip_quant_suffix(after);
-                        if model_base.starts_with(mmproj_model_base)
-                            || mmproj_model_base.starts_with(model_base)
-                        {
-                            return true;
-                        }
-                    }
-                    false
+                    lower.contains("mmproj")
                 })
                 .unwrap_or(false)
-        });
+        })
+        .collect();
 
-    let candidate = candidates.next()?;
-    if candidates.next().is_some() {
+    let named_matches: Vec<PathBuf> = mmproj_siblings
+        .iter()
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| {
+                    is_named_mmproj_match(&stem.to_ascii_lowercase(), model_base, &model_stem)
+                })
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+
+    if let Some(candidate) = choose_mmproj_candidate(&named_matches) {
+        return Some(candidate);
+    }
+    if !named_matches.is_empty() {
         return None;
     }
-    Some(candidate)
+
+    choose_mmproj_candidate(&mmproj_siblings)
 }
 
 pub fn resolve_mmproj_path(
@@ -642,6 +693,31 @@ mod tests {
         std::fs::write(&mmproj_b, b"mmproj").unwrap();
 
         assert!(find_mmproj_path("Qwen3VL-2B-Instruct-Q4_K_M", &model).is_none());
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn mmproj_path_prefers_bf16_generic_precision_variants() {
+        let temp = std::env::temp_dir().join(format!(
+            "mesh-llm-mmproj-precision-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let model = temp.join("Qwen3.5-0.8B-Q4_K_M.gguf");
+        let f32 = temp.join("mmproj-F32.gguf");
+        let f16 = temp.join("mmproj-F16.gguf");
+        let bf16 = temp.join("mmproj-BF16.gguf");
+        std::fs::write(&model, b"model").unwrap();
+        std::fs::write(&f32, b"mmproj").unwrap();
+        std::fs::write(&f16, b"mmproj").unwrap();
+        std::fs::write(&bf16, b"mmproj").unwrap();
+
+        let found = find_mmproj_path("Qwen3.5-0.8B-Q4_K_M", &model);
+        assert_eq!(found.as_deref(), Some(bf16.as_path()));
 
         let _ = std::fs::remove_dir_all(&temp);
     }

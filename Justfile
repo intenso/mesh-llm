@@ -324,8 +324,8 @@ test port="9337":
         | python3 -c "import sys,json; d=json.load(sys.stdin); t=d['timings']; print(d['choices'][0]['message'].get('content','')[:200]); print(f\"  prompt: {t['prompt_per_second']:.1f} tok/s  gen: {t['predicted_per_second']:.1f} tok/s ({t['predicted_n']} tok)\")"
 
 # Optional SDK compatibility smoke: 2 mesh nodes + 1 lite client.
-compat-smoke model:
-    scripts/ci-compat-smoke.sh "target/release/mesh-llm" "llama.cpp/build/bin" "{{ model }}"
+compat-smoke model mmproj="":
+    scripts/ci-compat-smoke.sh "target/release/mesh-llm" "llama.cpp/build/bin" "{{ model }}" "{{ mmproj }}"
 
 # Benchmark sticky-only vs prefix-only affinity on a 3-node local mesh.
 bench-prefix-affinity:
