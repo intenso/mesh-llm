@@ -445,7 +445,7 @@ impl ExternalPlugin {
             )
             .await?;
         Ok(ToolCallResult {
-            content_json: serde_json::to_string(&result)?,
+            content_json: normalize_tool_result_content(&result)?,
             is_error: result.is_error.unwrap_or(false),
         })
     }
@@ -720,6 +720,16 @@ impl ExternalPlugin {
         summary.tools.clear();
         summary.error = Some(reason);
     }
+}
+
+fn normalize_tool_result_content(result: &McpCallToolResult) -> Result<String> {
+    if let Some(value) = &result.structured_content {
+        return serde_json::to_string(value).map_err(Into::into);
+    }
+    if let Some(text) = result.content.first().and_then(|content| content.as_text()) {
+        return Ok(text.text.clone());
+    }
+    serde_json::to_string(&result.content).map_err(Into::into)
 }
 
 fn proto_mesh_visibility(mesh_visibility: MeshVisibility) -> i32 {

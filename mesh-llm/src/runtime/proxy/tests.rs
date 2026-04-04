@@ -88,6 +88,57 @@ impl plugin::PluginRpcBridge for BlobstoreTestBridge {
                 )));
             }
 
+            if method == "tools/call" {
+                let request: mesh_llm_plugin::ToolCallRequest = serde_json::from_str(&params_json)
+                    .map_err(|err| Self::error_response(err.to_string()))?;
+                let result_json = match request.name.as_str() {
+                    plugin::blobstore::PUT_REQUEST_OBJECT_TOOL => {
+                        let request: plugin::blobstore::PutRequestObjectRequest =
+                            serde_json::from_value(request.arguments)
+                                .map_err(|err| Self::error_response(err.to_string()))?;
+                        let response = store
+                            .put_request_object(request)
+                            .map_err(|err| Self::error_response(err.to_string()))?;
+                        let value = serde_json::to_value(response)
+                            .map_err(|err| Self::error_response(err.to_string()))?;
+                        serde_json::to_string(&rmcp::model::CallToolResult::structured(value))
+                            .map_err(|err| Self::error_response(err.to_string()))?
+                    }
+                    plugin::blobstore::GET_REQUEST_OBJECT_TOOL => {
+                        let request: plugin::blobstore::GetRequestObjectRequest =
+                            serde_json::from_value(request.arguments)
+                                .map_err(|err| Self::error_response(err.to_string()))?;
+                        let response = store
+                            .get_request_object(request)
+                            .map_err(|err| Self::error_response(err.to_string()))?;
+                        let value = serde_json::to_value(response)
+                            .map_err(|err| Self::error_response(err.to_string()))?;
+                        serde_json::to_string(&rmcp::model::CallToolResult::structured(value))
+                            .map_err(|err| Self::error_response(err.to_string()))?
+                    }
+                    plugin::blobstore::COMPLETE_REQUEST_TOOL
+                    | plugin::blobstore::ABORT_REQUEST_TOOL => {
+                        let request: plugin::blobstore::FinishRequestRequest =
+                            serde_json::from_value(request.arguments)
+                                .map_err(|err| Self::error_response(err.to_string()))?;
+                        let response = store
+                            .finish_request(&request.request_id)
+                            .map_err(|err| Self::error_response(err.to_string()))?;
+                        let value = serde_json::to_value(response)
+                            .map_err(|err| Self::error_response(err.to_string()))?;
+                        serde_json::to_string(&rmcp::model::CallToolResult::structured(value))
+                            .map_err(|err| Self::error_response(err.to_string()))?
+                    }
+                    _ => {
+                        return Err(Self::error_response(format!(
+                            "Unsupported blobstore tool '{}'",
+                            request.name
+                        )));
+                    }
+                };
+                return Ok(plugin::RpcResult { result_json });
+            }
+
             let result_json = match method.as_str() {
                 plugin::blobstore::PUT_REQUEST_OBJECT_METHOD => {
                     let request: plugin::blobstore::PutRequestObjectRequest =

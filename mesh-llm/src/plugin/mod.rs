@@ -18,6 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+use url::Url;
 
 #[allow(unused_imports)]
 pub use self::config::ExternalPluginSpec;
@@ -35,6 +36,7 @@ use mesh_llm_plugin::MeshVisibility;
 
 pub const BLACKBOARD_PLUGIN_ID: &str = "blackboard";
 pub const BLOBSTORE_PLUGIN_ID: &str = "blobstore";
+pub const LEMONADE_PLUGIN_ID: &str = "lemonade";
 pub(crate) const PROTOCOL_VERSION: u32 = mesh_llm_plugin::PROTOCOL_VERSION;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -142,6 +144,15 @@ pub struct PluginEndpointSummary {
     pub namespace: Option<String>,
     pub supports_streaming: bool,
     pub managed_by_plugin: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct EndpointHealthRecord {
+    state: String,
+    available: bool,
+    detail: Option<String>,
 }
 
 #[derive(Clone)]
@@ -152,6 +163,7 @@ pub struct PluginManager {
 struct PluginManagerInner {
     plugins: BTreeMap<String, ExternalPlugin>,
     inactive: BTreeMap<String, PluginSummary>,
+    endpoint_health: Arc<Mutex<BTreeMap<String, EndpointHealthRecord>>>,
     rpc_bridge: Arc<Mutex<Option<Arc<dyn PluginRpcBridge>>>>,
     #[cfg(test)]
     bridged_plugins: BTreeSet<String>,
@@ -227,6 +239,7 @@ impl PluginManager {
                     .cloned()
                     .map(|summary| (summary.name.clone(), summary))
                     .collect(),
+                endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
                 rpc_bridge,
                 #[cfg(test)]
                 bridged_plugins: BTreeSet::new(),
@@ -242,6 +255,7 @@ impl PluginManager {
             inner: Arc::new(PluginManagerInner {
                 plugins: BTreeMap::new(),
                 inactive: BTreeMap::new(),
+                endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
                 rpc_bridge: Arc::new(Mutex::new(Some(bridge))),
                 bridged_plugins: plugin_names
                     .iter()
@@ -264,19 +278,23 @@ impl PluginManager {
 
     pub async fn endpoints(&self) -> Result<Vec<PluginEndpointSummary>> {
         let summaries = self.list().await;
+        let endpoint_health = self.inner.endpoint_health.lock().await.clone();
         let mut endpoints = Vec::new();
         for summary in summaries {
             let Ok(Some(manifest)) = self.manifest(&summary.name).await else {
                 continue;
             };
-            let (state, available) = endpoint_state_from_plugin_status(&summary);
             for endpoint in manifest.endpoints {
+                let health = endpoint_health
+                    .get(&endpoint_key(&summary.name, &endpoint.endpoint_id))
+                    .cloned()
+                    .unwrap_or_else(|| endpoint_state_from_plugin_status(&summary));
                 endpoints.push(PluginEndpointSummary {
                     plugin_name: summary.name.clone(),
                     plugin_status: summary.status.clone(),
                     endpoint_id: endpoint.endpoint_id,
-                    state: state.to_string(),
-                    available,
+                    state: health.state,
+                    available: health.available,
                     kind: endpoint_kind_name(endpoint.kind).to_string(),
                     transport_kind: endpoint_transport_kind_name(endpoint.transport_kind)
                         .to_string(),
@@ -286,6 +304,7 @@ impl PluginManager {
                     namespace: endpoint.namespace,
                     supports_streaming: endpoint.supports_streaming,
                     managed_by_plugin: endpoint.managed_by_plugin,
+                    detail: health.detail,
                 });
             }
         }
@@ -333,6 +352,31 @@ impl PluginManager {
         tool_name: &str,
         arguments_json: &str,
     ) -> Result<ToolCallResult> {
+        if self.is_test_bridge_enabled(plugin_name) {
+            let bridge = self
+                .inner
+                .rpc_bridge
+                .lock()
+                .await
+                .clone()
+                .with_context(|| format!("No bridge configured for test plugin '{plugin_name}'"))?;
+            let arguments = parse_optional_json(arguments_json)?;
+            let params_json = serde_json::to_string(&serde_json::json!({
+                "name": tool_name,
+                "arguments": arguments,
+            }))
+            .with_context(|| format!("Serialize tool call for test plugin '{plugin_name}'"))?;
+            let result = bridge
+                .handle_request(plugin_name.to_string(), "tools/call".into(), params_json)
+                .await
+                .map_err(|err| anyhow!("{}", err.message))?;
+            let decoded: rmcp::model::CallToolResult = serde_json::from_str(&result.result_json)
+                .with_context(|| format!("Decode tool result from test plugin '{plugin_name}'"))?;
+            return Ok(ToolCallResult {
+                content_json: normalize_test_tool_result_content(&decoded)?,
+                is_error: decoded.is_error.unwrap_or(false),
+            });
+        }
         if let Some(summary) = self.inner.inactive.get(plugin_name) {
             bail!(
                 "Plugin '{}' is disabled: {}",
@@ -618,7 +662,11 @@ impl PluginManager {
                 tokio::time::interval(std::time::Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS));
             loop {
                 ticker.tick().await;
-                for plugin in manager.inner.plugins.values() {
+                let plugin_names = manager.inner.plugins.keys().cloned().collect::<Vec<_>>();
+                for plugin_name in plugin_names {
+                    let Some(plugin) = manager.inner.plugins.get(&plugin_name) else {
+                        continue;
+                    };
                     if let Err(err) = plugin.supervise().await {
                         tracing::warn!(
                             plugin = %plugin.name(),
@@ -626,9 +674,49 @@ impl PluginManager {
                             "Plugin supervision round failed"
                         );
                     }
+                    if let Err(err) = manager.refresh_plugin_endpoints(&plugin_name).await {
+                        tracing::warn!(
+                            plugin = %plugin_name,
+                            error = %err,
+                            "Endpoint supervision round failed"
+                        );
+                    }
                 }
             }
         });
+    }
+
+    async fn refresh_plugin_endpoints(&self, plugin_name: &str) -> Result<()> {
+        let summary = if let Some(plugin) = self.inner.plugins.get(plugin_name) {
+            plugin.summary().await
+        } else if let Some(summary) = self.inner.inactive.get(plugin_name) {
+            summary.clone()
+        } else {
+            self.clear_plugin_endpoint_health(plugin_name).await;
+            return Ok(());
+        };
+
+        let manifest = self.manifest(plugin_name).await.ok().flatten();
+        let mut endpoint_states = BTreeMap::new();
+        let Some(manifest) = manifest else {
+            self.clear_plugin_endpoint_health(plugin_name).await;
+            return Ok(());
+        };
+
+        for endpoint in manifest.endpoints {
+            let health = endpoint_health_for_summary(&summary, &endpoint).await;
+            endpoint_states.insert(endpoint_key(plugin_name, &endpoint.endpoint_id), health);
+        }
+
+        let mut registry = self.inner.endpoint_health.lock().await;
+        registry.retain(|key, _| !key.starts_with(&format!("{plugin_name}:")));
+        registry.extend(endpoint_states);
+        Ok(())
+    }
+
+    async fn clear_plugin_endpoint_health(&self, plugin_name: &str) {
+        let mut registry = self.inner.endpoint_health.lock().await;
+        registry.retain(|key, _| !key.starts_with(&format!("{plugin_name}:")));
     }
 }
 
@@ -753,23 +841,158 @@ fn endpoint_transport_kind_name(value: i32) -> &'static str {
     }
 }
 
-fn endpoint_state_from_plugin_status(summary: &PluginSummary) -> (&'static str, bool) {
+fn endpoint_state_from_plugin_status(summary: &PluginSummary) -> EndpointHealthRecord {
     if !summary.enabled || summary.status == "disabled" {
-        return ("unavailable", false);
+        return EndpointHealthRecord {
+            state: "unavailable".into(),
+            available: false,
+            detail: summary.error.clone(),
+        };
     }
 
     match summary.status.as_str() {
-        "running" => ("healthy", true),
-        "starting" | "restarting" => ("starting", false),
-        "degraded" => ("unhealthy", false),
-        _ => ("unavailable", false),
+        "running" => EndpointHealthRecord {
+            state: "healthy".into(),
+            available: true,
+            detail: None,
+        },
+        "starting" | "restarting" => EndpointHealthRecord {
+            state: "starting".into(),
+            available: false,
+            detail: summary.error.clone(),
+        },
+        "degraded" => EndpointHealthRecord {
+            state: "unhealthy".into(),
+            available: false,
+            detail: summary.error.clone(),
+        },
+        _ => EndpointHealthRecord {
+            state: "unavailable".into(),
+            available: false,
+            detail: summary.error.clone(),
+        },
     }
+}
+
+fn endpoint_key(plugin_name: &str, endpoint_id: &str) -> String {
+    format!("{plugin_name}:{endpoint_id}")
+}
+
+fn normalize_test_tool_result_content(result: &rmcp::model::CallToolResult) -> Result<String> {
+    if let Some(value) = &result.structured_content {
+        return serde_json::to_string(value).map_err(Into::into);
+    }
+    if let Some(text) = result.content.first().and_then(|content| content.as_text()) {
+        return Ok(text.text.clone());
+    }
+    serde_json::to_string(&result.content).map_err(Into::into)
+}
+
+async fn endpoint_health_for_summary(
+    summary: &PluginSummary,
+    endpoint: &proto::EndpointManifest,
+) -> EndpointHealthRecord {
+    if summary.status != "running" {
+        return endpoint_state_from_plugin_status(summary);
+    }
+
+    match probe_endpoint(endpoint).await {
+        Some(health) => health,
+        None => EndpointHealthRecord {
+            state: "healthy".into(),
+            available: true,
+            detail: None,
+        },
+    }
+}
+
+async fn probe_endpoint(endpoint: &proto::EndpointManifest) -> Option<EndpointHealthRecord> {
+    match (
+        proto::EndpointKind::try_from(endpoint.kind).unwrap_or(proto::EndpointKind::Unspecified),
+        proto::EndpointTransportKind::try_from(endpoint.transport_kind)
+            .unwrap_or(proto::EndpointTransportKind::Unspecified),
+    ) {
+        (proto::EndpointKind::Inference, proto::EndpointTransportKind::EndpointTransportHttp) => {
+            let protocol = endpoint.protocol.as_deref().unwrap_or_default();
+            if protocol.eq_ignore_ascii_case("openai_compatible") {
+                return Some(
+                    probe_openai_compatible_http_endpoint(endpoint.address.as_deref()?).await,
+                );
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+async fn probe_openai_compatible_http_endpoint(address: &str) -> EndpointHealthRecord {
+    let models_url = match endpoint_models_url(address) {
+        Some(url) => url,
+        None => {
+            return EndpointHealthRecord {
+                state: "unhealthy".into(),
+                available: false,
+                detail: Some(format!("invalid endpoint address '{address}'")),
+            };
+        }
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            return EndpointHealthRecord {
+                state: "unhealthy".into(),
+                available: false,
+                detail: Some(format!("build health probe client: {err}")),
+            };
+        }
+    };
+
+    match client.get(models_url.clone()).send().await {
+        Ok(response) if response.status().is_success() => EndpointHealthRecord {
+            state: "healthy".into(),
+            available: true,
+            detail: Some(format!("GET {} -> {}", models_url, response.status())),
+        },
+        Ok(response) => EndpointHealthRecord {
+            state: "unhealthy".into(),
+            available: false,
+            detail: Some(format!("GET {} -> {}", models_url, response.status())),
+        },
+        Err(err) => EndpointHealthRecord {
+            state: "unhealthy".into(),
+            available: false,
+            detail: Some(format!("GET {} failed: {}", models_url, err)),
+        },
+    }
+}
+
+fn endpoint_models_url(address: &str) -> Option<Url> {
+    let mut url = Url::parse(address).ok()?;
+    let mut path = url.path().trim_end_matches('/').to_string();
+    if path.is_empty() {
+        path = "/v1".into();
+    }
+    if !path.ends_with("/models") {
+        if path.ends_with("/v1") || path.ends_with("/api/v1") {
+            path.push_str("/models");
+        } else {
+            path.push_str("/v1/models");
+        }
+    }
+    url.set_path(&path);
+    url.set_query(None);
+    Some(url)
 }
 
 pub async fn run_plugin_process(name: String) -> Result<()> {
     match name.as_str() {
         BLACKBOARD_PLUGIN_ID => crate::plugins::blackboard::run_plugin(name).await,
         BLOBSTORE_PLUGIN_ID => crate::plugins::blobstore::run_plugin(name).await,
+        LEMONADE_PLUGIN_ID => crate::plugins::lemonade::run_plugin(name).await,
         _ => bail!("Unknown built-in plugin '{}'", name),
     }
 }
@@ -826,6 +1049,24 @@ mod tests {
         assert_eq!(resolved.externals.len(), 1);
         assert_eq!(resolved.externals[0].name, BLACKBOARD_PLUGIN_ID);
         assert!(resolved.inactive.is_empty());
+    }
+
+    #[test]
+    fn lemonade_can_be_enabled_explicitly() {
+        let config = MeshConfig {
+            plugins: vec![PluginConfigEntry {
+                name: LEMONADE_PLUGIN_ID.into(),
+                enabled: Some(true),
+                command: None,
+                args: Vec::new(),
+            }],
+            ..MeshConfig::default()
+        };
+        let resolved = resolve_plugins(&config, private_host_mode()).unwrap();
+        assert_eq!(resolved.externals.len(), 3);
+        assert_eq!(resolved.externals[0].name, BLACKBOARD_PLUGIN_ID);
+        assert_eq!(resolved.externals[1].name, LEMONADE_PLUGIN_ID);
+        assert_eq!(resolved.externals[2].name, BLOBSTORE_PLUGIN_ID);
     }
 
     #[test]
@@ -909,7 +1150,11 @@ mod tests {
         };
         assert_eq!(
             endpoint_state_from_plugin_status(&summary),
-            ("healthy", true)
+            EndpointHealthRecord {
+                state: "healthy".into(),
+                available: true,
+                detail: None,
+            }
         );
     }
 
@@ -930,7 +1175,23 @@ mod tests {
         };
         assert_eq!(
             endpoint_state_from_plugin_status(&summary),
-            ("starting", false)
+            EndpointHealthRecord {
+                state: "starting".into(),
+                available: false,
+                detail: Some("timed out".into()),
+            }
         );
+    }
+
+    #[test]
+    fn models_probe_url_extends_openai_v1_base() {
+        let url = endpoint_models_url("http://localhost:8000/v1").unwrap();
+        assert_eq!(url.as_str(), "http://localhost:8000/v1/models");
+    }
+
+    #[test]
+    fn models_probe_url_extends_api_v1_base() {
+        let url = endpoint_models_url("http://localhost:8000/api/v1").unwrap();
+        assert_eq!(url.as_str(), "http://localhost:8000/api/v1/models");
     }
 }
