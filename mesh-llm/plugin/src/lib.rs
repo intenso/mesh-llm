@@ -75,7 +75,7 @@ pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/meshllm.plugin.v1.rs"));
 }
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[macro_export]
 macro_rules! plugin_manifest {
