@@ -40,6 +40,10 @@ jobs:
             .github/cache-version.txt
             mesh-llm/ui/package-lock.json
 
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: mozilla-actions/sccache-action@v0.0.9
@@ -86,6 +90,7 @@ jobs:
             ninja-build \
             pkg-config \
             libssl-dev \
+            libdbus-1-dev \
             python3
           rm -rf /var/lib/apt/lists/*
 
@@ -147,6 +152,7 @@ jobs:
             ninja-build \
             pkg-config \
             libssl-dev \
+            libdbus-1-dev \
             python3
           rm -rf /var/lib/apt/lists/*
 
@@ -206,6 +212,7 @@ jobs:
             ninja-build \
             pkg-config \
             libssl-dev \
+            libdbus-1-dev \
             libvulkan-dev \
             glslc \
             python3

@@ -26,6 +26,12 @@ pub enum CryptoError {
     #[error("missing owner passphrase and no interactive terminal is available")]
     MissingPassphrase,
 
+    #[error("OS keychain unavailable: {reason}")]
+    KeychainUnavailable { reason: String },
+
+    #[error("OS keychain access denied: {reason}")]
+    KeychainAccessDenied { reason: String },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

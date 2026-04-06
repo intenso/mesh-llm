@@ -8,9 +8,10 @@ use zeroize::Zeroizing;
 use crate::cli::TrustCommand;
 use crate::crypto::{
     default_keystore_path, default_node_ownership_path, default_trust_store_path, keystore_exists,
-    keystore_metadata, load_keystore, load_node_ownership, load_trust_store, save_keystore,
-    save_node_ownership, save_trust_store, sign_node_ownership, verify_node_ownership,
-    OwnerKeypair, SignedNodeOwnership, TrustPolicy, TrustStore,
+    keystore_metadata, load_keystore, load_node_ownership, load_owner_keypair_from_keychain,
+    load_trust_store, save_keystore, save_keystore_with_keychain, save_node_ownership,
+    save_trust_store, sign_node_ownership, verify_node_ownership, OwnerKeychainLoadError,
+    OwnerKeypair, SignedNodeOwnership, TrustPolicy, TrustStore, KEYCHAIN_SERVICE,
 };
 use crate::mesh::{default_node_key_path, load_node_key_from_path, save_node_key_to_path};
 
@@ -89,6 +90,25 @@ fn resolve_keystore_passphrase(path: &Path) -> Result<Option<Zeroizing<String>>>
 }
 
 fn load_owner_keypair_from_path(path: &Path) -> Result<OwnerKeypair> {
+    let info = keystore_metadata(path)?;
+    if info.encrypted && std::env::var("MESH_LLM_OWNER_PASSPHRASE").is_err() {
+        match load_owner_keypair_from_keychain(path) {
+            Ok(keypair) => return Ok(keypair),
+            Err(OwnerKeychainLoadError::NoEntry)
+            | Err(OwnerKeychainLoadError::Crypto(crate::crypto::CryptoError::DecryptionFailed))
+            | Err(OwnerKeychainLoadError::Crypto(
+                crate::crypto::CryptoError::KeychainUnavailable { .. },
+            ))
+            | Err(OwnerKeychainLoadError::Crypto(
+                crate::crypto::CryptoError::KeychainAccessDenied { .. },
+            )) => {}
+            Err(OwnerKeychainLoadError::Crypto(err)) => {
+                return Err(err)
+                    .with_context(|| format!("Failed to load owner keystore {}", path.display()));
+            }
+        }
+    }
+
     let passphrase = resolve_keystore_passphrase(path)?;
     load_keystore(path, passphrase.as_deref().map(|value| value.as_str()))
         .with_context(|| format!("Failed to load owner keystore {}", path.display()))
@@ -130,30 +150,61 @@ fn load_effective_trust_store(path: &Path) -> Result<TrustStore> {
 }
 
 /// Run `mesh-llm auth init`.
-pub(crate) fn run_init(owner_key: Option<PathBuf>, force: bool, no_passphrase: bool) -> Result<()> {
+pub(crate) fn run_init(
+    owner_key: Option<PathBuf>,
+    force: bool,
+    no_passphrase: bool,
+    keychain: bool,
+) -> Result<()> {
+    let custom_owner_key = owner_key.is_some();
     let path = resolve_owner_key_path(owner_key)?;
+    let existing_keystore = keystore_exists(&path);
 
-    if keystore_exists(&path) && !force {
+    if existing_keystore && !force {
         bail!(
             "Owner keystore already exists at {}\nUse --force to overwrite.",
             path.display()
         );
     }
 
-    let passphrase = prompt_new_passphrase(no_passphrase)?;
-    let encrypted = passphrase.is_some();
+    let use_keychain = if keychain {
+        if !crate::crypto::keychain_available() {
+            bail!(
+                "No OS keychain backend is available on this host.\n\
+                 Retry without --keychain to set a passphrase, or with --no-passphrase \
+                 to store keys unencrypted."
+            );
+        }
+        true
+    } else {
+        let available =
+            (!existing_keystore && !no_passphrase) && crate::crypto::keychain_available();
+        should_default_to_keychain(existing_keystore, no_passphrase, available)
+    };
 
     let keypair = OwnerKeypair::generate();
     let owner_id = keypair.owner_id();
     let sign_pk = hex::encode(keypair.verifying_key().as_bytes());
     let enc_pk = hex::encode(keypair.encryption_public_key().as_bytes());
-
-    save_keystore(
-        &path,
-        &keypair,
-        passphrase.as_deref().map(|value| value.as_str()),
-        force,
-    )?;
+    let source = if no_passphrase {
+        save_keystore(&path, &keypair, None, force)?;
+        PassphraseSource::None
+    } else if use_keychain {
+        let account = save_keystore_with_keychain(&path, &keypair, force)?;
+        PassphraseSource::Keychain { account }
+    } else {
+        match prompt_new_passphrase(false)? {
+            Some(passphrase) => {
+                save_keystore(&path, &keypair, Some(passphrase.as_str()), force)?;
+                PassphraseSource::Prompt
+            }
+            None => {
+                save_keystore(&path, &keypair, None, force)?;
+                PassphraseSource::None
+            }
+        }
+    };
+    let encrypted = !matches!(source, PassphraseSource::None);
 
     eprintln!();
     eprintln!("Owner keystore created.");
@@ -162,12 +213,41 @@ pub(crate) fn run_init(owner_key: Option<PathBuf>, force: bool, no_passphrase: b
     eprintln!("Encryption key:  {enc_pk}");
     eprintln!("Path:            {}", path.display());
     eprintln!("Encrypted:       {}", if encrypted { "yes" } else { "no" });
+    match &source {
+        PassphraseSource::Keychain { account } => {
+            eprintln!(
+                "Unlock:          OS keychain (service={KEYCHAIN_SERVICE}, account={account})"
+            );
+        }
+        PassphraseSource::Prompt => {
+            eprintln!("Unlock:          passphrase prompt");
+        }
+        PassphraseSource::None => {}
+    }
     eprintln!();
     eprintln!("Next steps:");
-    eprintln!(
-        "- Copy this keystore to other trusted nodes that should share the same owner identity."
-    );
+    match &source {
+        PassphraseSource::Keychain { account } => {
+            eprintln!(
+                "- This keystore is unlock-bound to this machine's keychain. To share the same \
+                 owner identity on another node, retrieve the passphrase from your OS keychain \
+                 (service={KEYCHAIN_SERVICE}, account={account}) and enter it there, or re-run \
+                 `auth init` with a manual passphrase so the same passphrase can be used everywhere."
+            );
+        }
+        PassphraseSource::Prompt | PassphraseSource::None => {
+            eprintln!(
+                "- Copy this keystore to other trusted nodes that should share the same owner identity."
+            );
+        }
+    }
     eprintln!("- Start mesh-llm and it will automatically attest nodes from this keystore.");
+    if custom_owner_key {
+        eprintln!(
+            "- Pass --owner-key {} when starting mesh-llm.",
+            path.display()
+        );
+    }
 
     Ok(())
 }
@@ -203,6 +283,29 @@ pub(crate) fn run_status(
             eprintln!("Encryption key:  {epk}");
         }
         eprintln!("Created:         {}", info.created_at);
+        if info.encrypted {
+            match load_owner_keypair_from_keychain(&owner_key_path) {
+                Ok(_) => {
+                    eprintln!("Keystore:        valid (unlocked from OS keychain)");
+                }
+                Err(OwnerKeychainLoadError::Crypto(e)) => {
+                    eprintln!(
+                        "{}",
+                        encrypted_keystore_keychain_status(OwnerKeychainLoadError::Crypto(e))
+                    );
+                }
+                Err(e) => eprintln!("{}", encrypted_keystore_keychain_status(e)),
+            }
+        } else {
+            match load_keystore(&owner_key_path, None) {
+                Ok(_) => {
+                    eprintln!("Keystore:        valid (keys loaded successfully)");
+                }
+                Err(e) => {
+                    eprintln!("Keystore:        ERROR loading keys: {e}");
+                }
+            }
+        }
     }
 
     eprintln!();
@@ -611,4 +714,188 @@ pub(crate) fn run_trust_command(command: &TrustCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+enum PassphraseSource {
+    None,
+    Prompt,
+    Keychain { account: String },
+}
+
+fn encrypted_keystore_keychain_status(error: OwnerKeychainLoadError) -> String {
+    match error {
+        OwnerKeychainLoadError::NoEntry => {
+            "Keystore:        encrypted (no keychain entry for this path; provide the \
+             passphrase when the owner keystore is consumed)"
+                .into()
+        }
+        OwnerKeychainLoadError::Crypto(crate::crypto::CryptoError::DecryptionFailed) => {
+            "Keystore:        encrypted (keychain entry could not unlock this keystore; \
+             provide the passphrase when the owner keystore is consumed or remove the stale \
+             keychain entry for this path)"
+                .into()
+        }
+        OwnerKeychainLoadError::Crypto(crate::crypto::CryptoError::KeychainUnavailable {
+            reason,
+        }) => format!("Keystore:        encrypted (keychain unavailable: {reason})"),
+        OwnerKeychainLoadError::Crypto(crate::crypto::CryptoError::KeychainAccessDenied {
+            reason,
+        }) => format!(
+            "Keystore:        encrypted (keychain is locked or access was denied: {reason}; \
+             unlock the keychain and retry, or provide the passphrase when the owner keystore \
+             is consumed)"
+        ),
+        OwnerKeychainLoadError::Crypto(e) => format!("Keystore:        ERROR loading keys: {e}"),
+    }
+}
+
+fn should_default_to_keychain(
+    existing_keystore: bool,
+    no_passphrase: bool,
+    keychain_available: bool,
+) -> bool {
+    !existing_keystore && !no_passphrase && keychain_available
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    fn defaults_to_keychain_for_new_keystore_when_available() {
+        assert!(should_default_to_keychain(false, false, true));
+    }
+
+    #[test]
+    fn does_not_default_to_keychain_for_existing_keystore() {
+        assert!(!should_default_to_keychain(true, false, true));
+    }
+
+    #[test]
+    fn does_not_default_to_keychain_when_unavailable() {
+        assert!(!should_default_to_keychain(false, false, false));
+    }
+
+    #[test]
+    fn does_not_default_to_keychain_with_no_passphrase() {
+        assert!(!should_default_to_keychain(false, true, true));
+    }
+
+    #[test]
+    fn reports_stale_keychain_entry_as_encrypted_keystore() {
+        let message = encrypted_keystore_keychain_status(OwnerKeychainLoadError::Crypto(
+            crate::crypto::CryptoError::DecryptionFailed,
+        ));
+
+        assert!(message.contains("keychain entry could not unlock this keystore"));
+        assert!(message.contains("remove the stale keychain entry for this path"));
+    }
+
+    #[test]
+    #[serial]
+    fn force_keychain_save_failure_restores_previous_secret() {
+        if !crate::crypto::keychain_available() {
+            eprintln!("keychain backend unavailable, skipping");
+            return;
+        }
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("mesh-llm-force-rollback-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let blocking_file = tmp_dir.join("blocker");
+        std::fs::write(&blocking_file, b"not a directory").unwrap();
+        let bad_path = blocking_file.join("owner-keystore.json");
+
+        let account = crate::crypto::owner_keychain_account_for_path(&bad_path);
+        let previous_secret = "previous-unlock-secret-do-not-lose";
+        crate::crypto::keychain_set(KEYCHAIN_SERVICE, &account, previous_secret).unwrap();
+
+        let result = run_init(Some(bad_path.clone()), true, false, true);
+        assert!(
+            result.is_err(),
+            "run_init must fail when save cannot succeed"
+        );
+
+        let restored = crate::crypto::keychain_get(KEYCHAIN_SERVICE, &account).unwrap();
+        assert_eq!(
+            restored.as_deref(),
+            Some(previous_secret),
+            "previous keychain secret must be restored after failed force-init"
+        );
+
+        crate::crypto::keychain_delete(KEYCHAIN_SERVICE, &account).ok();
+        std::fs::remove_dir_all(&tmp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn fresh_keychain_save_failure_leaves_no_orphan() {
+        if !crate::crypto::keychain_available() {
+            eprintln!("keychain backend unavailable, skipping");
+            return;
+        }
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("mesh-llm-fresh-rollback-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let blocking_file = tmp_dir.join("blocker");
+        std::fs::write(&blocking_file, b"not a directory").unwrap();
+        let bad_path = blocking_file.join("owner-keystore.json");
+
+        let account = crate::crypto::owner_keychain_account_for_path(&bad_path);
+        crate::crypto::keychain_delete(KEYCHAIN_SERVICE, &account).ok();
+
+        let result = run_init(Some(bad_path.clone()), false, false, true);
+        assert!(
+            result.is_err(),
+            "run_init must fail when save cannot succeed"
+        );
+
+        let residual = crate::crypto::keychain_get(KEYCHAIN_SERVICE, &account).unwrap();
+        assert_eq!(
+            residual, None,
+            "a fresh init failure must leave no keychain entry behind"
+        );
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn init_defaults_to_keychain_then_load_round_trip() {
+        if !crate::crypto::keychain_available() {
+            eprintln!("keychain backend unavailable, skipping");
+            return;
+        }
+
+        let dir =
+            std::env::temp_dir().join(format!("mesh-llm-keychain-rt-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("owner-keystore.json");
+
+        run_init(Some(path.clone()), false, false, false)
+            .expect("auth init should default to keychain when available");
+
+        assert!(path.exists(), "keystore file should exist");
+        let info = keystore_metadata(&path).unwrap();
+        assert!(
+            info.encrypted,
+            "keystore should be encrypted when using keychain"
+        );
+
+        let account = crate::crypto::owner_keychain_account_for_path(&path);
+        let stored = crate::crypto::keychain_get(KEYCHAIN_SERVICE, &account).unwrap();
+        assert!(
+            stored.is_some(),
+            "keychain must have a passphrase entry for this keystore path"
+        );
+
+        let kp = load_owner_keypair_from_keychain(&path).expect("load via keychain must succeed");
+        assert_eq!(kp.owner_id(), info.owner_id);
+
+        crate::crypto::keychain_delete(KEYCHAIN_SERVICE, &account).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

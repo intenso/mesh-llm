@@ -14,7 +14,7 @@ use crate::api;
 use crate::cli::{Cli, Command, RuntimeSurface};
 use crate::crypto::{
     default_keystore_path, default_trust_store_path, keystore_exists, keystore_metadata,
-    load_keystore, load_trust_store,
+    load_keystore, load_owner_keypair_from_keychain, load_trust_store, OwnerKeychainLoadError,
 };
 use crate::inference::{election, launch, moe};
 use crate::mesh;
@@ -79,6 +79,25 @@ fn resolve_owner_passphrase(path: &Path) -> Result<Option<Zeroizing<String>>> {
 }
 
 fn load_owner_keypair_for_runtime(path: &Path) -> Result<crate::crypto::OwnerKeypair> {
+    let info = keystore_metadata(path)?;
+    if info.encrypted && std::env::var("MESH_LLM_OWNER_PASSPHRASE").is_err() {
+        match load_owner_keypair_from_keychain(path) {
+            Ok(keypair) => return Ok(keypair),
+            Err(OwnerKeychainLoadError::NoEntry)
+            | Err(OwnerKeychainLoadError::Crypto(crate::crypto::CryptoError::DecryptionFailed))
+            | Err(OwnerKeychainLoadError::Crypto(
+                crate::crypto::CryptoError::KeychainUnavailable { .. },
+            ))
+            | Err(OwnerKeychainLoadError::Crypto(
+                crate::crypto::CryptoError::KeychainAccessDenied { .. },
+            )) => {}
+            Err(OwnerKeychainLoadError::Crypto(err)) => {
+                return Err(err)
+                    .with_context(|| format!("Failed to load owner keystore {}", path.display()));
+            }
+        }
+    }
+
     let passphrase = resolve_owner_passphrase(path)?;
     load_keystore(path, passphrase.as_deref().map(|value| value.as_str()))
         .with_context(|| format!("Failed to load owner keystore {}", path.display()))

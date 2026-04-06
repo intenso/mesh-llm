@@ -97,7 +97,7 @@ pub fn save_keystore(
     };
 
     let json = serde_json::to_string_pretty(&keystore)?;
-    write_keystore_atomically(path, json.as_bytes())?;
+    write_keystore_bytes_atomically(path, json.as_bytes())?;
     Ok(())
 }
 
@@ -275,7 +275,10 @@ fn build_encrypted_keystore(
     })
 }
 
-fn write_keystore_atomically(path: &Path, bytes: &[u8]) -> Result<(), CryptoError> {
+pub(crate) fn write_keystore_bytes_atomically(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), CryptoError> {
     let parent = path.parent().ok_or_else(|| {
         CryptoError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

@@ -46,8 +46,14 @@ pub(crate) enum AuthCommand {
         #[arg(long)]
         force: bool,
         /// Skip passphrase prompt (store keys unencrypted).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "keychain")]
         no_passphrase: bool,
+        /// Store a random unlock passphrase in the OS keychain (macOS Keychain,
+        /// Windows Credential Manager, Linux Secret Service). New keystores
+        /// already default to this when a backend is available; use this flag
+        /// to force it when overwriting an existing keystore.
+        #[arg(long)]
+        keychain: bool,
     },
     /// Show current owner identity status.
     Status {
