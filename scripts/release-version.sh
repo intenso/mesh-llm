@@ -35,6 +35,9 @@ update_lib_version() {
     before="$(cat "$file")"
     after="$(perl -0777 -pe 's/pub const VERSION: &str = "\K[^"]+(?=";)/'"$next"'/g' "$file")"
     if [[ "$before" == "$after" ]]; then
+        if grep -Eq 'pub const VERSION: &str = "'"$next"'";' "$file"; then
+            return
+        fi
         echo "failed to update VERSION constant in $file" >&2
         exit 1
     fi
@@ -47,8 +50,11 @@ update_manifest_version() {
     local before
     local after
     before="$(cat "$file")"
-    after="$(perl -0777 -pe 's/(\[package\][^[]*?\nversion\s*=\s*")[^"]+(")/$1'"$next"'$2/s' "$file")"
+    after="$(perl -0777 -pe 's/(\[package\][^[]*?\nversion\s*=\s*")[^"]+(")/${1}'"$next"'$2/s' "$file")"
     if [[ "$before" == "$after" ]]; then
+        if perl -0777 -ne 'exit((/\[package\][^[]*?\nversion\s*=\s*"'"$next"'"/s) ? 0 : 1)' "$file"; then
+            return
+        fi
         echo "failed to update [package].version in $file" >&2
         exit 1
     fi
