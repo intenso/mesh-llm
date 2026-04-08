@@ -8,6 +8,7 @@ use crate::mesh;
 use crate::network::affinity::{
     prepare_remote_targets_for_request, AffinityRouter, PreparedTargets,
 };
+use crate::network::openai::errors;
 use crate::network::router;
 use crate::plugin;
 use anyhow::{anyhow, bail, Context, Result};
@@ -89,6 +90,7 @@ struct ParsedResponseHeaders {
 
 struct ResponseProbe {
     buffered: Vec<u8>,
+    header_end: usize,
     status_code: u16,
     retryable_context_overflow: bool,
 }
@@ -1314,11 +1316,7 @@ async fn relay_translated_responses_stream<R: AsyncRead + Unpin>(
     }
 
     if !(200..300).contains(&probe.status_code) {
-        tcp_stream.write_all(&probe.buffered).await?;
-        let _ = tcp_stream.shutdown().await;
-        return Ok(RouteAttemptResult::Delivered {
-            status_code: probe.status_code,
-        });
+        return relay_error_response(tcp_stream, reader, probe).await;
     }
 
     let parsed = try_parse_response_headers(&probe.buffered)?
@@ -1445,15 +1443,11 @@ async fn relay_translated_responses_json<R: AsyncRead + Unpin>(
         return Ok(RouteAttemptResult::RetryableContextOverflow);
     }
 
+    if !(200..300).contains(&probe.status_code) {
+        return relay_error_response(tcp_stream, reader, probe).await;
+    }
     let mut buffered = probe.buffered;
     reader.read_to_end(&mut buffered).await?;
-    if !(200..300).contains(&probe.status_code) {
-        tcp_stream.write_all(&buffered).await?;
-        let _ = tcp_stream.shutdown().await;
-        return Ok(RouteAttemptResult::Delivered {
-            status_code: probe.status_code,
-        });
-    }
 
     let parsed = try_parse_response_headers(&buffered)?
         .ok_or_else(|| anyhow!("incomplete HTTP response"))?;
@@ -1604,9 +1598,63 @@ async fn probe_http_response_with_timeout<R: AsyncRead + Unpin>(
 
     Ok(ResponseProbe {
         buffered,
+        header_end: parsed.header_end,
         status_code: parsed.status_code,
         retryable_context_overflow,
     })
+}
+
+fn reason_phrase(status_code: u16) -> &'static str {
+    match status_code {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Error",
+    }
+}
+
+fn remap_error_http_response(
+    status_code: u16,
+    header_end: usize,
+    full_response: &[u8],
+) -> Option<Vec<u8>> {
+    if status_code < 400 || header_end > full_response.len() {
+        return None;
+    }
+    let mapped_body = errors::map_upstream_error_body(status_code, &full_response[header_end..])?;
+    let header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        status_code,
+        reason_phrase(status_code),
+        mapped_body.len()
+    );
+    let mut response = header.into_bytes();
+    response.extend_from_slice(&mapped_body);
+    Some(response)
+}
+
+async fn relay_error_response<R: AsyncRead + Unpin>(
+    tcp_stream: &mut TcpStream,
+    reader: &mut R,
+    probe: ResponseProbe,
+) -> Result<RouteAttemptResult> {
+    let status_code = probe.status_code;
+    let header_end = probe.header_end;
+    let mut buffered = probe.buffered;
+    if let Err(err) = reader.read_to_end(&mut buffered).await {
+        tracing::debug!("error response relay read ended before EOF: {err}");
+    }
+    let outgoing =
+        remap_error_http_response(status_code, header_end, &buffered).unwrap_or(buffered);
+    tcp_stream.write_all(&outgoing).await?;
+    let _ = tcp_stream.shutdown().await;
+    Ok(RouteAttemptResult::Delivered { status_code })
 }
 
 async fn relay_probed_response<R: AsyncRead + Unpin>(
@@ -1632,6 +1680,9 @@ async fn relay_probed_response<R: AsyncRead + Unpin>(
 
     if retry_context_overflow && probe.retryable_context_overflow {
         return Ok(RouteAttemptResult::RetryableContextOverflow);
+    }
+    if !(200..300).contains(&probe.status_code) {
+        return relay_error_response(tcp_stream, reader, probe).await;
     }
 
     tcp_stream.write_all(&probe.buffered).await?;
@@ -2985,6 +3036,36 @@ mod tests {
         assert!(rewritten.starts_with("POST /api/v1/chat/completions HTTP/1.1\r\n"));
         assert!(rewritten.contains("\r\nHost: localhost:8000\r\n"));
         assert!(rewritten.ends_with("\r\n\r\n{}"));
+    }
+
+    #[test]
+    fn test_remap_error_http_response_rewrites_llama_error_body() {
+        let upstream = b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 52\r\n\r\n{\"type\":\"not_found_error\",\"message\":\"model missing\"}";
+        let header_end = upstream
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|idx| idx + 4)
+            .unwrap();
+        let remapped = remap_error_http_response(404, header_end, upstream)
+            .expect("llama error should be remapped");
+        let remapped_text = String::from_utf8(remapped).unwrap();
+
+        assert!(remapped_text.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(remapped_text.contains("\r\nContent-Type: application/json\r\n"));
+        assert!(remapped_text.contains("\"type\":\"invalid_request_error\""));
+        assert!(remapped_text.contains("\"code\":\"model_not_found\""));
+        assert!(remapped_text.contains("\"message\":\"model missing\""));
+    }
+
+    #[test]
+    fn test_remap_error_http_response_keeps_openai_error_passthrough() {
+        let upstream = b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 110\r\n\r\n{\"error\":{\"message\":\"bad request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_value\"}}";
+        let header_end = upstream
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|idx| idx + 4)
+            .unwrap();
+        assert!(remap_error_http_response(400, header_end, upstream).is_none());
     }
 
     #[tokio::test]
