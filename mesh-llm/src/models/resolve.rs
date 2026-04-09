@@ -441,6 +441,44 @@ mod tests {
         let resolved = resolve_hf_file_from_siblings("model", &siblings).unwrap();
         assert_eq!(resolved, "model-00001-of-00048.safetensors");
     }
+
+    #[test]
+    fn repo_only_resolution_prefers_mlx_model_safetensors() {
+        let siblings = vec![
+            "Qwen3-8B-Q4_K_M.gguf".to_string(),
+            "model.safetensors".to_string(),
+            "model.safetensors.index.json".to_string(),
+        ];
+        let resolved = resolve_hf_file_from_siblings("", &siblings).unwrap();
+        assert_eq!(resolved, "model.safetensors");
+    }
+
+    #[test]
+    fn repo_only_resolution_falls_back_to_gguf_when_no_mlx_weights() {
+        let siblings = vec![
+            "Qwen3-8B-Q8_0.gguf".to_string(),
+            "Qwen3-8B-Q4_K_M.gguf".to_string(),
+        ];
+        let resolved = resolve_hf_file_from_siblings("", &siblings).unwrap();
+        assert_eq!(resolved, "Qwen3-8B-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn parse_huggingface_ref_rejects_http_url() {
+        assert!(parse_huggingface_ref("https://example.com/model.gguf").is_none());
+    }
+
+    #[test]
+    fn parse_huggingface_repo_ref_parses_repo_only() {
+        let parsed = parse_huggingface_repo_ref("GreenBitAI/Llama-2-7B-layer-mix-bpw-2.2-mlx");
+        assert_eq!(
+            parsed,
+            Some((
+                "GreenBitAI/Llama-2-7B-layer-mix-bpw-2.2-mlx".to_string(),
+                None
+            ))
+        );
+    }
 }
 
 fn matching_catalog_model_by_basename(repo_file: &str) -> Option<&'static catalog::CatalogModel> {
@@ -480,15 +518,39 @@ pub(super) fn parse_huggingface_ref(input: &str) -> Option<(String, Option<Strin
     if parts.len() != 3 {
         return None;
     }
+    if parts[0].is_empty() || parts[1].is_empty() || parts[0].contains(':') {
+        return None;
+    }
     let (repo_tail, revision) = match parts[1].split_once('@') {
         Some((repo, revision)) => (repo, Some(revision.to_string())),
         None => (parts[1], None),
     };
+    if repo_tail.is_empty() {
+        return None;
+    }
     Some((
         format!("{}/{}", parts[0], repo_tail),
         revision,
         parts[2].to_string(),
     ))
+}
+
+fn parse_huggingface_repo_ref(input: &str) -> Option<(String, Option<String>)> {
+    let parts: Vec<&str> = input.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    if parts[0].is_empty() || parts[1].is_empty() || parts[0].contains(':') {
+        return None;
+    }
+    let (repo_tail, revision) = match parts[1].split_once('@') {
+        Some((repo, revision)) => (repo, Some(revision.to_string())),
+        None => (parts[1], None),
+    };
+    if repo_tail.is_empty() {
+        return None;
+    }
+    Some((format!("{}/{}", parts[0], repo_tail), revision))
 }
 
 fn parse_exact_model_ref(input: &str) -> Result<ExactModelRef> {
@@ -502,6 +564,13 @@ fn parse_exact_model_ref(input: &str) -> Result<ExactModelRef> {
             file,
         });
     }
+    if let Some((repo, revision)) = parse_huggingface_repo_ref(input) {
+        return Ok(ExactModelRef::HuggingFace {
+            repo,
+            revision,
+            file: String::new(),
+        });
+    }
     if input.starts_with("http://") || input.starts_with("https://") {
         return Ok(ExactModelRef::Url {
             url: input.to_string(),
@@ -509,11 +578,55 @@ fn parse_exact_model_ref(input: &str) -> Result<ExactModelRef> {
         });
     }
     bail!(
-        "Expected an exact model ref. Use a catalog id, a Hugging Face ref like org/repo/file.gguf, org/repo/file-stem for split GGUFs, org/repo/model.safetensors, or org/repo/model-00001-of-00048.safetensors, or a direct URL."
+        "Expected an exact model ref. Use a catalog id, a Hugging Face ref like org/repo, org/repo/file.gguf, org/repo/file-stem for split GGUFs, org/repo/model.safetensors, or org/repo/model-00001-of-00048.safetensors, or a direct URL."
     )
 }
 
+fn is_split_mlx_first_shard(file: &str) -> bool {
+    let Some(rest) = file.strip_prefix("model-") else {
+        return false;
+    };
+    let Some(rest) = rest.strip_suffix(".safetensors") else {
+        return false;
+    };
+    let Some((left, right)) = rest.split_once("-of-") else {
+        return false;
+    };
+    left == "00001" && right.len() == 5 && right.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn select_default_hf_file_from_siblings(siblings: &[String]) -> Option<String> {
+    siblings
+        .iter()
+        .filter_map(|file| {
+            let lower = file.to_lowercase();
+            let rank = if lower == "model.safetensors" {
+                0
+            } else if is_split_mlx_first_shard(&lower) {
+                1
+            } else if lower.ends_with(".gguf") {
+                if lower.contains("-000") && !lower.contains("-00001-of-") {
+                    return None;
+                }
+                if lower.contains("-00001-of-") {
+                    2
+                } else {
+                    3
+                }
+            } else {
+                return None;
+            };
+            Some((rank, file_preference_score(file), file.clone()))
+        })
+        .min_by(|left, right| left.cmp(right))
+        .map(|(_, _, file)| file)
+}
+
 fn resolve_hf_file_from_siblings(requested: &str, siblings: &[String]) -> Option<String> {
+    if requested.is_empty() {
+        return select_default_hf_file_from_siblings(siblings);
+    }
+
     if requested.ends_with(".gguf")
         || requested.ends_with(".safetensors")
         || requested.ends_with(".safetensors.index.json")
