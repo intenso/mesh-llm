@@ -2963,7 +2963,7 @@ export function ChatPage(props: {
    */
   function addImageAttachment(attachment: Omit<ChatAttachment, "id" | "status" | "error">) {
     const attachmentId = randomId();
-    const needsDescription = canRunBrowserVision();
+    const needsDescription = !selectedModelVision && canRunBrowserVision();
     setPendingAttachments((prev) => [
       ...prev,
       {
