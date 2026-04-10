@@ -3,6 +3,7 @@ use super::{capabilities, catalog, find_model_path, format_size_bytes};
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::{Repo, RepoType};
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -219,7 +220,75 @@ pub async fn show_exact_model(input: &str) -> Result<ModelDetails> {
     }
 }
 
-fn quant_selector_from_gguf_file(file: &str) -> Option<String> {
+pub async fn show_model_variants(input: &str) -> Result<Option<Vec<ModelDetails>>> {
+    let input = canonicalize_model_ref_input(input).await?;
+    let parsed = parse_huggingface_repo_ref(&input).or_else(|| parse_huggingface_repo_url(&input));
+    let Some((repo, revision, selector)) = parsed else {
+        return Ok(None);
+    };
+    if selector.is_some() {
+        return Ok(None);
+    }
+
+    let api = super::build_hf_tokio_api(false)?;
+    let revision_ref = revision.as_deref().unwrap_or("main");
+    let detail = api
+        .repo(Repo::with_revision(
+            repo.clone(),
+            RepoType::Model,
+            revision_ref.to_string(),
+        ))
+        .info()
+        .await
+        .with_context(|| format!("Fetch Hugging Face repo {repo}"))?;
+
+    let sibling_entries: Vec<(String, Option<u64>)> = detail
+        .siblings
+        .iter()
+        .map(|sibling| (sibling.rfilename.clone(), sibling.size))
+        .collect();
+    let available_bytes = crate::system::hardware::survey().vram_bytes;
+    let variants = collect_show_gguf_variants_from_siblings(&sibling_entries, available_bytes);
+    if variants.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    let mut seen_refs = HashSet::new();
+    let mut out = Vec::new();
+    for (file, size_bytes) in variants {
+        let Some(_selector) = quant_selector_from_gguf_file(&file) else {
+            continue;
+        };
+        let exact_ref = format_huggingface_display_ref(&repo, revision.as_deref(), &file);
+        if !seen_refs.insert(exact_ref.clone()) {
+            continue;
+        }
+        let size_label = match size_bytes {
+            Some(bytes) => Some(format_size_bytes(bytes)),
+            None => remote_hf_size_label_with_api(&api, &repo, revision.as_deref(), &file).await,
+        };
+        out.push(ModelDetails {
+            display_name: Path::new(&file)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&file)
+                .to_string(),
+            exact_ref,
+            source: "huggingface",
+            kind: artifact_kind_for_file(&file),
+            download_url: huggingface_resolve_url(&repo, revision.as_deref(), &file),
+            size_label,
+            description: None,
+            draft: None,
+            capabilities: ModelCapabilities::default(),
+            moe: None,
+        });
+    }
+
+    Ok(Some(out))
+}
+
+pub(super) fn quant_selector_from_gguf_file(file: &str) -> Option<String> {
     if !file.ends_with(".gguf") {
         return None;
     }
@@ -833,6 +902,57 @@ mod tests {
             "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL"
         );
     }
+
+    #[test]
+    fn collect_show_gguf_variants_excludes_mmproj_and_nonfirst_split() {
+        let siblings = vec![
+            ("mmproj-BF16.gguf".to_string(), Some(1_200_000_000)),
+            (
+                "gemma-4-26B-A4B-it-UD-Q3_K_S-00002-of-00009.gguf".to_string(),
+                Some(12_500_000_000),
+            ),
+            (
+                "gemma-4-26B-A4B-it-UD-Q3_K_S-00001-of-00009.gguf".to_string(),
+                Some(12_500_000_000),
+            ),
+            (
+                "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf".to_string(),
+                Some(16_900_000_000),
+            ),
+        ];
+        let files: Vec<_> = collect_show_gguf_variants_from_siblings(&siblings, 0)
+            .into_iter()
+            .map(|(file, _)| file)
+            .collect();
+        assert_eq!(
+            files,
+            vec![
+                "gemma-4-26B-A4B-it-UD-Q3_K_S-00001-of-00009.gguf".to_string(),
+                "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_show_gguf_variants_orders_by_fit_when_memory_known() {
+        let siblings = vec![
+            ("model-UD-Q5_K_M.gguf".to_string(), Some(21_200_000_000)),
+            ("model-UD-Q4_K_M.gguf".to_string(), Some(16_900_000_000)),
+            ("model-UD-Q3_K_S.gguf".to_string(), Some(12_500_000_000)),
+        ];
+        let files: Vec<_> = collect_show_gguf_variants_from_siblings(&siblings, 19_300_000_000)
+            .into_iter()
+            .map(|(file, _)| file)
+            .collect();
+        assert_eq!(
+            files,
+            vec![
+                "model-UD-Q4_K_M.gguf".to_string(),
+                "model-UD-Q3_K_S.gguf".to_string(),
+                "model-UD-Q5_K_M.gguf".to_string(),
+            ]
+        );
+    }
 }
 
 fn matching_catalog_model_by_basename(repo_file: &str) -> Option<&'static catalog::CatalogModel> {
@@ -1154,6 +1274,47 @@ fn gguf_matches_quant_selector(file_lower: &str, selector_lower: &str) -> bool {
         || file_lower.contains(&format!("-{selector_lower}-"))
         || file_lower.ends_with(&format!("-{selector_lower}.gguf"))
         || file_lower.ends_with(&format!("/{selector_lower}.gguf"))
+}
+
+fn is_known_gguf_sidecar(file: &str) -> bool {
+    let basename = file.rsplit('/').next().unwrap_or(file);
+    basename.to_ascii_lowercase().starts_with("mmproj")
+}
+
+fn collect_show_gguf_variants_from_siblings(
+    siblings: &[(String, Option<u64>)],
+    available_bytes: u64,
+) -> Vec<(String, Option<u64>)> {
+    let mut gguf_candidates: Vec<(String, Option<u64>)> = siblings
+        .iter()
+        .filter_map(|(file, size)| {
+            let lower = file.to_lowercase();
+            if !lower.ends_with(".gguf") {
+                return None;
+            }
+            if is_known_gguf_sidecar(file) {
+                return None;
+            }
+            if lower.contains("-000") && !lower.contains("-00001-of-") {
+                return None;
+            }
+            Some((file.clone(), *size))
+        })
+        .collect();
+
+    if available_bytes == 0 {
+        gguf_candidates.sort_by(|left, right| {
+            file_preference_score(&left.0)
+                .cmp(&file_preference_score(&right.0))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        return gguf_candidates;
+    }
+
+    gguf_candidates.sort_by(|left, right| {
+        compare_gguf_candidates_by_fit(&left.0, left.1, &right.0, right.1, available_bytes)
+    });
+    gguf_candidates
 }
 
 fn fit_bucket(size_bytes: u64, available_bytes: u64) -> u8 {

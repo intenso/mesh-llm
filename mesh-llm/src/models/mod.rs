@@ -21,7 +21,7 @@ pub use local::{
 pub use maintenance::{run_update, warn_about_updates_for_paths};
 pub use resolve::{
     download_exact_ref, find_catalog_model_exact, installed_model_capabilities,
-    installed_model_display_name, resolve_model_spec, show_exact_model,
+    installed_model_display_name, resolve_model_spec, show_exact_model, show_model_variants,
 };
 pub use search::{search_catalog_models, search_huggingface, SearchArtifactFilter, SearchProgress};
 pub use topology::{infer_local_model_topology, ModelMoeInfo, ModelTopology};

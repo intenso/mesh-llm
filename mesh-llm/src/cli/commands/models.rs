@@ -2,11 +2,12 @@ use crate::cli::models::ModelsCommand;
 use crate::models::{
     capabilities, catalog, download_exact_ref, find_catalog_model_exact, huggingface_hub_cache_dir,
     installed_model_capabilities, scan_installed_models, search_catalog_models, search_huggingface,
-    show_exact_model, SearchArtifactFilter, SearchProgress,
+    show_exact_model, show_model_variants, SearchArtifactFilter, SearchProgress,
 };
 use crate::system::hardware;
 use anyhow::{anyhow, Result};
 use std::io::Write;
+use std::path::Path;
 
 pub async fn run_model_search(
     query: &[String],
@@ -175,35 +176,46 @@ pub fn run_model_installed() {
     println!("💾 Installed models");
     println!("📁 HF cache: {}", huggingface_hub_cache_dir().display());
     println!();
-    for name in installed {
+    for name in installed.iter() {
         let path = crate::models::find_model_path(&name);
         let size = std::fs::metadata(&path).map(|meta| meta.len()).ok();
         let catalog_model = find_catalog_model_exact(&name);
         let model_capabilities = installed_model_capabilities(&name);
 
-        match size {
-            Some(bytes) => println!("• {}  {}", name, format_installed_size(bytes)),
-            None => println!("• {}", name),
+        println!("📦 {}", name);
+        println!("   type: {}", installed_model_kind(&path));
+        if let Some(bytes) = size {
+            println!("   📏 {}", format_installed_size(bytes));
         }
-        println!("  🤗 HF cache");
-        println!("  {}", path.display());
-        if let Some(model) = catalog_model {
-            println!("  {}", model.description);
-            if let Some(draft) = model.draft.as_deref() {
-                println!("  🧠 Draft: {}", draft);
-            }
-            if model.moe.is_some() {
-                println!("  🧩 MoE: yes");
-            }
+        let mut caps = vec!["💬 text".to_string()];
+        if model_capabilities.multimodal_label().is_some() {
+            caps.push("🎛️ multimodal".to_string());
         }
         if let Some(label) = model_capabilities.vision_label() {
-            println!("  👁️ Vision: {}", label);
+            caps.push(format!("👁️ vision ({label})"));
         }
         if let Some(label) = model_capabilities.audio_label() {
-            println!("  🔊 Audio: {}", label);
+            caps.push(format!("🔊 audio ({label})"));
         }
         if let Some(label) = model_capabilities.reasoning_label() {
-            println!("  🧠 Reasoning: {}", label);
+            caps.push(format!("🧠 reasoning ({label})"));
+        }
+        if let Some(label) = model_capabilities.tool_use_label() {
+            caps.push(format!("🛠️ tool use ({label})"));
+        }
+        println!("   capabilities: {}", caps.join("  "));
+        println!("   ref: {}", name);
+        println!("   show: mesh-llm models show {}", name);
+        println!("   download: mesh-llm models download {}", name);
+        println!("   path: {}", path.display());
+        if let Some(model) = catalog_model {
+            println!("   about: {}", model.description);
+            if let Some(draft) = model.draft.as_deref() {
+                println!("   🧠 draft: {}", draft);
+            }
+            if model.moe.is_some() {
+                println!("   🧩 MoE: yes");
+            }
         }
         println!();
     }
@@ -260,6 +272,68 @@ pub async fn run_model_show(model_ref: &str) -> Result<()> {
     }
     println!("📥 Download:");
     println!("   {}", details.download_url);
+
+    if let Some(variants) = show_model_variants(model_ref).await? {
+        if !variants.is_empty() {
+            println!();
+            println!("Variants:");
+            let mut rows = Vec::new();
+            for variant in variants {
+                let size = variant.size_label.as_deref().unwrap_or("-");
+                let fit = variant
+                    .size_label
+                    .as_deref()
+                    .and_then(fit_hint_for_size_label)
+                    .unwrap_or_else(|| "-".to_string());
+                let selected = variant.exact_ref == details.exact_ref;
+                rows.push((
+                    variant_selector_label(&variant.exact_ref),
+                    size.to_string(),
+                    fit,
+                    variant.exact_ref,
+                    selected,
+                ));
+            }
+            let quant_width = rows
+                .iter()
+                .map(|(quant, _, _, _, _)| quant.len())
+                .max()
+                .unwrap_or(5)
+                .max("quant".len());
+            let size_width = rows
+                .iter()
+                .map(|(_, size, _, _, _)| size.len())
+                .max()
+                .unwrap_or(4)
+                .max("size".len());
+            let fit_width = rows
+                .iter()
+                .map(|(_, _, fit, _, _)| fit.len())
+                .max()
+                .unwrap_or(3)
+                .max("fit".len());
+
+            println!(
+                "{:<quant_width$}  {:>size_width$}  {:<fit_width$}  ref",
+                "quant", "size", "fit"
+            );
+            println!(
+                "{:-<quant_width$}  {:-<size_width$}  {:-<fit_width$}  {:-<3}",
+                "", "", "", ""
+            );
+
+            for (quant, size, fit, r#ref, selected) in rows {
+                println!(
+                    "{:<quant_width$}  {:>size_width$}  {:<fit_width$}  {}{}",
+                    quant,
+                    size,
+                    fit,
+                    r#ref,
+                    if selected { "  ← selected" } else { "" }
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -298,6 +372,18 @@ fn format_installed_size(bytes: u64) -> String {
         format!("{:.0}MB", bytes as f64 / 1e6)
     } else {
         format!("{}B", bytes)
+    }
+}
+
+fn installed_model_kind(path: &Path) -> &'static str {
+    let text = path.to_string_lossy().to_ascii_lowercase();
+    if text.ends_with(".safetensors")
+        || text.ends_with(".safetensors.index.json")
+        || text.contains("model.safetensors")
+    {
+        "🍎 MLX"
+    } else {
+        "🦙 GGUF"
     }
 }
 
@@ -348,6 +434,21 @@ fn fit_hint_for_size_label(size_label: &str) -> Option<String> {
         "⛔ likely too large for local serve"
     };
     Some(hint.to_string())
+}
+
+fn variant_selector_label(exact_ref: &str) -> String {
+    if let Some((_, selector)) = exact_ref.split_once(':') {
+        return selector
+            .split_once('@')
+            .map(|(value, _)| value)
+            .unwrap_or(selector)
+            .to_string();
+    }
+    Path::new(exact_ref)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(exact_ref)
+        .to_string()
 }
 
 pub async fn dispatch_models_command(command: &ModelsCommand) -> Result<()> {
