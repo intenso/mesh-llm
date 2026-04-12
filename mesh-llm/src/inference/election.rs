@@ -13,6 +13,7 @@ use crate::system::hardware;
 use launch::{BinaryFlavor, SplitMode};
 use mesh::NodeRole;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -679,25 +680,69 @@ fn resolve_runtime_moe_config(
     let started = std::time::Instant::now();
     let (ranking, ranking_source, ranking_origin) = match options.ranking_strategy {
         moe::MoeRankingStrategy::Auto => {
-            if let Some(artifact) = moe::best_shared_ranking_artifact(model_path) {
-                let cached = moe::shared_ranking_cache_path(model_path, &artifact);
+            let model_path_for_ranking = model_path.to_path_buf();
+            let resolved_ranking_result: anyhow::Result<
+                Option<crate::system::moe_planner::ResolvedRanking>,
+            > = match tokio::runtime::Handle::try_current() {
+                Ok(handle) => match tokio::task::block_in_place(|| {
+                    handle.block_on(tokio::task::spawn_blocking(move || {
+                        crate::system::moe_planner::resolve_runtime_ranking(
+                            &model_path_for_ranking,
+                            crate::system::moe_planner::DEFAULT_MOE_RANKINGS_DATASET,
+                        )
+                    }))
+                }) {
+                    Ok(Ok(resolved)) => Ok(resolved),
+                    Ok(Err(err)) => {
+                        eprintln!(
+                            "⚠ [{model_name}] Failed to resolve shared MoE ranking ({err}); falling back to local analysis or sequential expert order"
+                        );
+                        Ok(None)
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "⚠ [{model_name}] Failed to join shared MoE ranking resolver ({err}); falling back to local analysis or sequential expert order"
+                        );
+                        Ok(None)
+                    }
+                },
+                Err(_) => crate::system::moe_planner::resolve_runtime_ranking(
+                    model_path,
+                    crate::system::moe_planner::DEFAULT_MOE_RANKINGS_DATASET,
+                ),
+            };
+            let resolved_ranking = match resolved_ranking_result {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    eprintln!(
+                        "⚠ [{model_name}] Failed to resolve shared MoE ranking ({err}); falling back to local analysis or sequential expert order"
+                    );
+                    None
+                }
+            };
+            if let Some(resolved) = resolved_ranking {
                 eprintln!(
-                    "🧩 [{model_name}] Using cached MoE ranking mode={} origin={} cache={}",
-                    artifact.kind.label(),
-                    artifact.origin.label(),
-                    cached.display()
+                    "🧩 [{model_name}] Using {} MoE ranking mode={} path={}",
+                    resolved.source.label(),
+                    resolved.analyzer_id,
+                    resolved.path.display()
                 );
                 (
-                    artifact.ranking,
-                    artifact.kind.label().to_string(),
-                    artifact.origin.label().to_string(),
+                    moe::load_cached_ranking(&resolved.path).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Failed to load resolved ranking {}",
+                            resolved.path.display()
+                        )
+                    })?,
+                    resolved.analyzer_id,
+                    resolved.source.label().to_string(),
                 )
             } else {
                 if should_attempt_local_micro_analyze(model_path, model_name, local_vram_budget) {
                     match ensure_micro_analyze_ranking(bin_dir, model_name, model_path, options) {
                         Ok(artifact) => (
                             artifact.ranking,
-                            artifact.kind.label().to_string(),
+                            "micro-v1".to_string(),
                             artifact.origin.label().to_string(),
                         ),
                         Err(err) => {
@@ -728,7 +773,7 @@ fn resolve_runtime_moe_config(
             let artifact = ensure_full_analyze_ranking(bin_dir, model_name, model_path, &cached)?;
             (
                 artifact.ranking,
-                artifact.kind.label().to_string(),
+                "full-v1".to_string(),
                 artifact.origin.label().to_string(),
             )
         }
@@ -736,7 +781,7 @@ fn resolve_runtime_moe_config(
             let artifact = ensure_micro_analyze_ranking(bin_dir, model_name, model_path, options)?;
             (
                 artifact.ranking,
-                artifact.kind.label().to_string(),
+                "micro-v1".to_string(),
                 artifact.origin.label().to_string(),
             )
         }
@@ -769,22 +814,56 @@ fn refresh_auto_moe_config_from_cache(
     let Some(artifact) = moe::best_shared_ranking_artifact(model_path) else {
         return false;
     };
-    if cfg.config.ranking == artifact.ranking
-        && cfg.ranking_source == artifact.kind.label()
-        && cfg.ranking_origin == artifact.origin.label()
+    let resolved = crate::system::moe_planner::ResolvedRanking {
+        path: moe::shared_ranking_cache_path(model_path, &artifact),
+        metadata_path: None,
+        analyzer_id: match artifact.kind {
+            moe::SharedRankingKind::Analyze => "full-v1",
+            moe::SharedRankingKind::MicroAnalyze => "micro-v1",
+        }
+        .to_string(),
+        source: crate::system::moe_planner::RankingSource::LocalCache,
+        reason: "local ranking refresh".to_string(),
+    };
+    let Some(ranking) = moe::load_cached_ranking(&resolved.path) else {
+        return false;
+    };
+    if cfg.config.ranking == ranking
+        && cfg.ranking_source == resolved.analyzer_id
+        && cfg.ranking_origin == resolved.source.label()
     {
         return false;
     }
 
     eprintln!(
-        "🧩 [{model_name}] Switching to better cached MoE ranking mode={} origin={}",
-        artifact.kind.label(),
-        artifact.origin.label()
+        "🧩 [{model_name}] Switching to better {} MoE ranking mode={}",
+        resolved.source.label(),
+        resolved.analyzer_id
     );
-    cfg.config.ranking = artifact.ranking;
-    cfg.ranking_source = artifact.kind.label().to_string();
-    cfg.ranking_origin = artifact.origin.label().to_string();
+    cfg.config.ranking = ranking;
+    cfg.ranking_source = resolved.analyzer_id;
+    cfg.ranking_origin = resolved.source.label().to_string();
     true
+}
+
+fn print_runtime_submit_suggestion(model_name: &str, model_path: &Path, ranking_path: &Path) {
+    let Some(identity) = crate::models::huggingface_identity_for_path(model_path) else {
+        return;
+    };
+    eprintln!("🧠 [{model_name}] Generated a local MoE ranking");
+    eprintln!(
+        "📍 [{model_name}] Ranking cache: {}",
+        ranking_path.display()
+    );
+    eprintln!(
+        "☁️  [{model_name}] Published source: {}",
+        crate::system::moe_planner::DEFAULT_MOE_RANKINGS_DATASET
+    );
+    eprintln!("⚠️  [{model_name}] This run did not use a published ranking.");
+    eprintln!(
+        "📤 [{model_name}] Contribute it with: mesh-llm moe share '{}'",
+        identity.canonical_ref
+    );
 }
 
 fn resolve_analyze_binary(bin_dir: &Path) -> anyhow::Result<std::path::PathBuf> {
@@ -1020,6 +1099,14 @@ fn ensure_full_analyze_ranking(
     }
     let analyze_bin = resolve_analyze_binary(bin_dir)?;
     let started = std::time::Instant::now();
+    let temp_output = std::env::temp_dir().join(format!(
+        "mesh-llm-full-live-{}-{}.csv",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
     eprintln!(
         "🧩 [{model_name}] MoE analysis mode=full-analyze cache={}",
         cached_path.display()
@@ -1037,7 +1124,7 @@ fn ensure_full_analyze_ranking(
             &model_path.to_string_lossy(),
             "--all-layers",
             "--export-ranking",
-            &cached_path.to_string_lossy(),
+            &temp_output.to_string_lossy(),
             "-n",
             "32",
             "-c",
@@ -1069,10 +1156,10 @@ fn ensure_full_analyze_ranking(
     }
     let _ = spinner.join();
     anyhow::ensure!(status.success(), "llama-moe-analyze exited with {status}");
-    let ranking = moe::load_cached_ranking(cached_path).ok_or_else(|| {
+    let ranking = moe::load_cached_ranking(&temp_output).ok_or_else(|| {
         anyhow::anyhow!(
             "No ranking produced by full analyze at {}",
-            cached_path.display()
+            temp_output.display()
         )
     })?;
     let artifact = moe::SharedRankingArtifact {
@@ -1083,13 +1170,21 @@ fn ensure_full_analyze_ranking(
         micro_tokens: None,
         micro_layer_scope: None,
     };
-    moe::cache_shared_ranking_if_stronger(model_path, &artifact)?;
+    let wrote_cache = moe::cache_shared_ranking_if_stronger(model_path, &artifact)?;
+    std::fs::copy(&temp_output, cached_path)?;
+    let _ = std::fs::remove_file(&temp_output);
     eprintln!(
         "  Full moe-analyze cached at {} in {:.1}s (origin={})",
         cached_path.display(),
         started.elapsed().as_secs_f64(),
         artifact.origin.label()
     );
+    if !wrote_cache {
+        eprintln!(
+            "  A stronger or equivalent shared ranking already exists, so this full-v1 result was not promoted as the preferred shared artifact"
+        );
+    }
+    print_runtime_submit_suggestion(model_name, model_path, cached_path);
     Ok(artifact)
 }
 
@@ -1120,21 +1215,33 @@ fn ensure_micro_analyze_ranking(
         );
         return Ok(artifact);
     }
-    let ranking = run_micro_analyze_ranking(bin_dir, model_name, model_path, options)?;
+    let analyze = run_micro_analyze_ranking(bin_dir, model_name, model_path, options)?;
     let artifact = moe::SharedRankingArtifact {
         kind: moe::SharedRankingKind::MicroAnalyze,
         origin: moe::SharedRankingOrigin::LocalMicroAnalyze,
-        ranking,
+        ranking: analyze.ranking,
         micro_prompt_count: Some(options.micro_prompt_count),
         micro_tokens: Some(options.micro_tokens),
         micro_layer_scope: Some(options.micro_layer_scope),
     };
-    moe::cache_shared_ranking_if_stronger(model_path, &artifact)?;
+    let wrote_cache = moe::cache_shared_ranking_if_stronger(model_path, &artifact)?;
+    write_runtime_canonical_micro_ranking(
+        &cached_path,
+        &artifact,
+        &analyze.rows,
+        analyze.rows.iter().map(|(_, values)| values.0).sum::<f64>(),
+    )?;
     eprintln!(
         "  Micro moe-analyze cached at {} (origin={})",
         cached_path.display(),
         artifact.origin.label()
     );
+    if !wrote_cache {
+        eprintln!(
+            "  A stronger or equivalent shared ranking already exists, so this micro-v1 result was not promoted as the preferred shared artifact"
+        );
+    }
+    print_runtime_submit_suggestion(model_name, model_path, &cached_path);
     Ok(artifact)
 }
 
@@ -1142,6 +1249,12 @@ fn ensure_micro_analyze_ranking(
 struct AnalyzeMassRow {
     expert_id: u32,
     gate_mass: f64,
+    selection_count: u64,
+}
+
+struct RuntimeMicroAnalyzeResult {
+    ranking: Vec<u32>,
+    rows: Vec<(u32, (f64, u64))>,
 }
 
 fn run_micro_analyze_ranking(
@@ -1149,7 +1262,7 @@ fn run_micro_analyze_ranking(
     model_name: &str,
     model_path: &Path,
     options: &moe::MoeRuntimeOptions,
-) -> anyhow::Result<Vec<u32>> {
+) -> anyhow::Result<RuntimeMicroAnalyzeResult> {
     let prompts = default_micro_prompts();
     let prompt_count = options.micro_prompt_count.max(1).min(prompts.len());
     let analyze_bin = resolve_analyze_binary(bin_dir)?;
@@ -1164,7 +1277,7 @@ fn run_micro_analyze_ranking(
     ));
     std::fs::create_dir_all(&tmp_dir)?;
     let started = std::time::Instant::now();
-    let mut mass_by_expert: HashMap<u32, f64> = HashMap::new();
+    let mut mass_by_expert: HashMap<u32, (f64, u64)> = HashMap::new();
     eprintln!(
         "🧩 [{model_name}] MoE analysis mode=micro-analyze prompts={} tokens={} layers={} cache=pending",
         prompt_count,
@@ -1234,7 +1347,9 @@ fn run_micro_analyze_ranking(
             );
         }
         for row in load_analyze_mass_rows(&output_path)? {
-            *mass_by_expert.entry(row.expert_id).or_insert(0.0) += row.gate_mass;
+            let entry = mass_by_expert.entry(row.expert_id).or_insert((0.0, 0));
+            entry.0 += row.gate_mass;
+            entry.1 += row.selection_count;
         }
         if let Ok(mut state) = progress.lock() {
             state.current_prompt = idx + 1;
@@ -1248,11 +1363,12 @@ fn run_micro_analyze_ranking(
 
     let mut rows = mass_by_expert.into_iter().collect::<Vec<_>>();
     rows.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
+        b.1 .0
+            .partial_cmp(&a.1 .0)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
     });
-    let ranking = rows.into_iter().map(|(expert_id, _)| expert_id).collect();
+    let ranking = rows.iter().map(|(expert_id, _)| *expert_id).collect();
     let _ = std::fs::remove_dir_all(&tmp_dir);
     eprintln!(
         "  Micro moe-analyze used {} prompt(s), {} token(s), {} in {:.1}s",
@@ -1264,7 +1380,7 @@ fn run_micro_analyze_ranking(
         },
         started.elapsed().as_secs_f64()
     );
-    Ok(ranking)
+    Ok(RuntimeMicroAnalyzeResult { ranking, rows })
 }
 
 fn load_analyze_mass_rows(path: &Path) -> anyhow::Result<Vec<AnalyzeMassRow>> {
@@ -1282,9 +1398,57 @@ fn load_analyze_mass_rows(path: &Path) -> anyhow::Result<Vec<AnalyzeMassRow>> {
         rows.push(AnalyzeMassRow {
             expert_id: parts[0].parse()?,
             gate_mass: parts[1].parse()?,
+            selection_count: parts[3].parse()?,
         });
     }
     Ok(rows)
+}
+
+fn write_runtime_canonical_micro_ranking(
+    path: &Path,
+    artifact: &moe::SharedRankingArtifact,
+    ranking: &[(u32, (f64, u64))],
+    total_mass_sum: f64,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut output = String::new();
+    writeln!(&mut output, "# mesh-llm-moe-ranking=v1").ok();
+    writeln!(&mut output, "# ranking_kind={}", artifact.kind.label()).ok();
+    writeln!(&mut output, "# ranking_origin={}", artifact.origin.label()).ok();
+    if let Some(prompt_count) = artifact.micro_prompt_count {
+        writeln!(&mut output, "# micro_prompt_count={prompt_count}").ok();
+    }
+    if let Some(tokens) = artifact.micro_tokens {
+        writeln!(&mut output, "# micro_tokens={tokens}").ok();
+    }
+    if let Some(layer_scope) = artifact.micro_layer_scope {
+        let scope = match layer_scope {
+            moe::MoeMicroLayerScope::All => "all",
+            moe::MoeMicroLayerScope::First => "first",
+        };
+        writeln!(&mut output, "# micro_layer_scope={scope}").ok();
+    }
+    writeln!(
+        &mut output,
+        "expert_id,total_mass,mass_fraction,selection_count"
+    )
+    .ok();
+    for (expert_id, (gate_mass, selection_count)) in ranking {
+        let mass_fraction = if total_mass_sum > 0.0 {
+            gate_mass / total_mass_sum
+        } else {
+            0.0
+        };
+        writeln!(
+            &mut output,
+            "{expert_id},{gate_mass:.12},{mass_fraction:.12},{selection_count}"
+        )
+        .ok();
+    }
+    std::fs::write(path, output)?;
+    Ok(())
 }
 
 fn default_micro_prompts() -> &'static [&'static str] {

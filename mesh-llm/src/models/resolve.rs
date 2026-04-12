@@ -1,3 +1,4 @@
+use super::local::HuggingFaceModelIdentity;
 use super::ModelCapabilities;
 use super::{capabilities, catalog, find_model_path, format_size_bytes};
 use anyhow::{anyhow, bail, Context, Result};
@@ -63,9 +64,15 @@ pub fn find_catalog_model_exact(query: &str) -> Option<&'static catalog::Catalog
 }
 
 pub async fn download_exact_ref(input: &str) -> Result<PathBuf> {
+    download_exact_ref_with_progress(input, true).await
+}
+
+pub async fn download_exact_ref_with_progress(input: &str, progress: bool) -> Result<PathBuf> {
     let input = canonicalize_model_ref_input(input).await?;
     match parse_exact_model_ref(&input)? {
-        ExactModelRef::Catalog(model) => catalog::download_model(model).await,
+        ExactModelRef::Catalog(model) => {
+            catalog::download_model_with_progress(model, progress).await
+        }
         ExactModelRef::HuggingFace {
             repo,
             revision,
@@ -75,25 +82,37 @@ pub async fn download_exact_ref(input: &str) -> Result<PathBuf> {
             if let Some(model) =
                 matching_catalog_primary_for_huggingface(&repo, revision.as_deref(), &file)
             {
-                return catalog::download_model(model).await;
+                return catalog::download_model_with_progress(model, progress).await;
             }
-            catalog::download_hf_repo_file(&repo, revision.as_deref(), &file).await
+            catalog::download_hf_repo_file_with_progress(
+                &repo,
+                revision.as_deref(),
+                &file,
+                progress,
+            )
+            .await
         }
         ExactModelRef::Url { url, filename } => {
             if let Some(model) = matching_catalog_primary_for_url(&url) {
-                return catalog::download_model(model).await;
+                return catalog::download_model_with_progress(model, progress).await;
             }
             let dest = catalog::models_dir().join(&filename);
             if existing_download(&dest).await {
                 return Ok(dest);
             }
-            eprintln!("📥 Downloading {}...", dest.display());
+            if progress {
+                eprintln!("📥 Downloading {}...", dest.display());
+            }
             catalog::download_hf_split_gguf(&url, &filename).await
         }
     }
 }
 
 pub async fn resolve_model_spec(input: &Path) -> Result<PathBuf> {
+    resolve_model_spec_with_progress(input, true).await
+}
+
+pub async fn resolve_model_spec_with_progress(input: &Path, progress: bool) -> Result<PathBuf> {
     let raw = input.to_string_lossy();
 
     if input.exists() {
@@ -107,11 +126,11 @@ pub async fn resolve_model_spec(input: &Path) -> Result<PathBuf> {
             return Ok(installed_path);
         }
         if let Some(entry) = catalog::find_model(&raw) {
-            return catalog::download_model(entry).await;
+            return catalog::download_model_with_progress(entry, progress).await;
         }
         if let Ok(canonical) = canonicalize_model_ref_input(&raw).await {
             if canonical != raw {
-                return download_exact_ref(&canonical)
+                return download_exact_ref_with_progress(&canonical, progress)
                     .await
                     .with_context(|| format!("Resolve model spec {raw}"));
             }
@@ -122,7 +141,7 @@ pub async fn resolve_model_spec(input: &Path) -> Result<PathBuf> {
         );
     }
 
-    download_exact_ref(&raw)
+    download_exact_ref_with_progress(&raw, progress)
         .await
         .with_context(|| format!("Resolve model spec {raw}"))
 }
@@ -221,6 +240,101 @@ pub async fn show_exact_model(input: &str) -> Result<ModelDetails> {
                     .unwrap_or_default(),
                 moe: catalog.and_then(|model| model.moe.clone()),
             })
+        }
+    }
+}
+
+pub async fn resolve_huggingface_model_identity(
+    input: &str,
+) -> Result<Option<HuggingFaceModelIdentity>> {
+    let input = canonicalize_model_ref_input(input).await?;
+    match parse_exact_model_ref(&input)? {
+        ExactModelRef::Catalog(model) => {
+            let (Some(repo), revision, Some(file)) = (
+                model.source_repo(),
+                model.source_revision(),
+                model.source_file(),
+            ) else {
+                return Ok(None);
+            };
+            let revision = revision.unwrap_or("main");
+            let api = super::build_hf_tokio_api(false)?;
+            let detail = api
+                .repo(Repo::with_revision(
+                    repo.to_string(),
+                    RepoType::Model,
+                    revision.to_string(),
+                ))
+                .info()
+                .await
+                .with_context(|| format!("Fetch Hugging Face repo {repo}@{revision}"))?;
+            return Ok(Some(HuggingFaceModelIdentity {
+                repo_id: repo.to_string(),
+                revision: detail.sha.clone(),
+                file: file.to_string(),
+                canonical_ref: format!("{repo}@{}/{file}", detail.sha),
+                local_file_name: Path::new(file)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(file)
+                    .to_string(),
+            }));
+        }
+        ExactModelRef::HuggingFace {
+            repo,
+            revision,
+            file,
+        } => {
+            let resolved_file = resolve_huggingface_file(&repo, revision.as_deref(), &file).await?;
+            let revision_ref = revision.as_deref().unwrap_or("main");
+            let api = super::build_hf_tokio_api(false)?;
+            let detail = api
+                .repo(Repo::with_revision(
+                    repo.clone(),
+                    RepoType::Model,
+                    revision_ref.to_string(),
+                ))
+                .info()
+                .await
+                .with_context(|| format!("Fetch Hugging Face repo {repo}@{revision_ref}"))?;
+            return Ok(Some(HuggingFaceModelIdentity {
+                repo_id: repo.clone(),
+                revision: detail.sha.clone(),
+                canonical_ref: format!("{}@{}/{}", repo, detail.sha, resolved_file),
+                local_file_name: Path::new(&resolved_file)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(&resolved_file)
+                    .to_string(),
+                file: resolved_file,
+            }));
+        }
+        ExactModelRef::Url { url, .. } => {
+            if let Some((repo, revision, file)) = parse_hf_resolve_url(&url) {
+                let revision_ref = revision.as_deref().unwrap_or("main");
+                let api = super::build_hf_tokio_api(false)?;
+                let detail = api
+                    .repo(Repo::with_revision(
+                        repo.clone(),
+                        RepoType::Model,
+                        revision_ref.to_string(),
+                    ))
+                    .info()
+                    .await
+                    .with_context(|| format!("Fetch Hugging Face repo {repo}@{revision_ref}"))?;
+                return Ok(Some(HuggingFaceModelIdentity {
+                    repo_id: repo.clone(),
+                    revision: detail.sha.clone(),
+                    canonical_ref: format!("{}@{}/{}", repo, detail.sha, file),
+                    local_file_name: Path::new(&file)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or(&file)
+                        .to_string(),
+                    file,
+                }));
+            }
+            Ok(None)
         }
     }
 }
