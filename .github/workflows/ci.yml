@@ -281,13 +281,15 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.models/${{ env.MODEL_FILE }}
-          key: ${{ env.CACHE_NAMESPACE }}-${{ runner.os }}-model-${{ env.MODEL_FILE }}-${{ hashFiles('.github/cache-version.txt', '.github/workflows/ci.yml') }}
+          key: ${{ env.CACHE_NAMESPACE }}-${{ runner.os }}-model-${{ env.MODEL_FILE }}-${{ hashFiles('.github/cache-version.txt') }}
+          restore-keys: |
+            ${{ env.CACHE_NAMESPACE }}-${{ runner.os }}-model-${{ env.MODEL_FILE }}-
 
       - name: Download model
         if: ${{ (github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true') && steps.cache-model.outputs.cache-hit != 'true' }}
         run: |
           mkdir -p ~/.models
-          curl -fSL "$MODEL_URL" -o ~/.models/$MODEL_FILE
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fSL "$MODEL_URL" -o ~/.models/$MODEL_FILE
           ls -lh ~/.models/$MODEL_FILE
 
       # ── Integration smoke test ──
@@ -314,13 +316,15 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.models/${{ env.MOE_MODEL_FILE }}
-          key: ${{ env.CACHE_NAMESPACE }}-${{ runner.os }}-model-${{ env.MOE_MODEL_FILE }}-${{ hashFiles('.github/cache-version.txt', '.github/workflows/ci.yml') }}
+          key: ${{ env.CACHE_NAMESPACE }}-${{ runner.os }}-model-${{ env.MOE_MODEL_FILE }}-${{ hashFiles('.github/cache-version.txt') }}
+          restore-keys: |
+            ${{ env.CACHE_NAMESPACE }}-${{ runner.os }}-model-${{ env.MOE_MODEL_FILE }}-
 
       - name: Download MoE model
         if: ${{ (github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true') && steps.cache-moe-model.outputs.cache-hit != 'true' }}
         run: |
           mkdir -p ~/.models
-          curl -fSL "$MOE_MODEL_URL" -o ~/.models/$MOE_MODEL_FILE
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fSL "$MOE_MODEL_URL" -o ~/.models/$MOE_MODEL_FILE
           ls -lh ~/.models/$MOE_MODEL_FILE
 
       - name: MoE split test (expert sharding)
