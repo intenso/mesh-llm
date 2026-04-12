@@ -39,6 +39,14 @@ const MICRO_PROMPTS: &[&str] = &[
     "Write a short answer on why model evaluation matters.",
 ];
 
+struct TempRootGuard(PathBuf);
+
+impl Drop for TempRootGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 pub(crate) async fn dispatch_moe_command(command: &MoeCommand, cli: &Cli) -> Result<()> {
     match command {
         MoeCommand::Plan {
@@ -201,6 +209,7 @@ async fn run_analyze_micro(
             .as_nanos()
     ));
     fs::create_dir_all(&temp_root)?;
+    let _temp_root_guard = TempRootGuard(temp_root.clone());
 
     eprintln!("📍 Model: {}", resolved.display_name);
     eprintln!(
@@ -289,13 +298,64 @@ async fn run_analyze_micro(
         ranking: ranking.iter().map(|(expert_id, _)| *expert_id).collect(),
         ..artifact
     };
-    moe::cache_shared_ranking_if_stronger(&resolved.path, &artifact)?;
+    let wrote_cache = moe::cache_shared_ranking_if_stronger(&resolved.path, &artifact)?;
     let cache_path = moe::shared_ranking_cache_path(&resolved.path, &artifact);
-    let _ = fs::remove_dir_all(&temp_root);
+    if wrote_cache {
+        write_canonical_micro_ranking(
+            &cache_path,
+            &artifact,
+            &ranking,
+            ranking.iter().map(|(_, values)| values.0).sum::<f64>(),
+        )?;
+    }
     println!("✅ Micro MoE analysis complete");
     println!("  Ranking: {}", cache_path.display());
     println!("  Log: {}", log_path.display());
     print_submit_suggestion(&resolved.path);
+    Ok(())
+}
+
+fn write_canonical_micro_ranking(
+    path: &Path,
+    artifact: &moe::SharedRankingArtifact,
+    ranking: &[(u32, (f64, u64))],
+    total_mass_sum: f64,
+) -> Result<()> {
+    let mut output = String::new();
+    writeln!(&mut output, "# mesh-llm-moe-ranking=v1").ok();
+    writeln!(&mut output, "# ranking_kind={}", artifact.kind.label()).ok();
+    writeln!(&mut output, "# ranking_origin={}", artifact.origin.label()).ok();
+    if let Some(prompt_count) = artifact.micro_prompt_count {
+        writeln!(&mut output, "# micro_prompt_count={prompt_count}").ok();
+    }
+    if let Some(tokens) = artifact.micro_tokens {
+        writeln!(&mut output, "# micro_tokens={tokens}").ok();
+    }
+    if let Some(layer_scope) = artifact.micro_layer_scope {
+        let scope = match layer_scope {
+            moe::MoeMicroLayerScope::First => "first",
+            moe::MoeMicroLayerScope::All => "all",
+        };
+        writeln!(&mut output, "# micro_layer_scope={scope}").ok();
+    }
+    writeln!(
+        &mut output,
+        "expert_id,total_mass,mass_fraction,selection_count"
+    )
+    .ok();
+    for (expert_id, (gate_mass, selection_count)) in ranking {
+        let mass_fraction = if total_mass_sum > 0.0 {
+            gate_mass / total_mass_sum
+        } else {
+            0.0
+        };
+        writeln!(
+            &mut output,
+            "{expert_id},{gate_mass:.12},{mass_fraction:.12},{selection_count}"
+        )
+        .ok();
+    }
+    fs::write(path, output).with_context(|| format!("Write {}", path.display()))?;
     Ok(())
 }
 

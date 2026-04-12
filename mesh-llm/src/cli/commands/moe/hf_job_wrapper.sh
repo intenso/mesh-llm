@@ -30,7 +30,7 @@ with urllib.request.urlopen(url, timeout=120) as response, archive.open("wb") as
     shutil.copyfileobj(response, handle)
 bundle.mkdir(parents=True, exist_ok=True)
 with tarfile.open(archive, "r:gz") as tar:
-    tar.extractall(bundle, filter="fully_trusted")
+    tar.extractall(bundle, filter="data")
 entries = [entry for entry in bundle.iterdir() if entry.exists()]
 bundle_root = entries[0] if len(entries) == 1 and entries[0].is_dir() else bundle
 Path(".bundle-root").write_text(str(bundle_root))

@@ -420,7 +420,7 @@ Usage:
 
 ```bash
 mesh-llm moe share unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S
-mesh-llm moe share unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S --ranking-file ~/.cache/mesh-llm/moe/.../ranking.csv
+mesh-llm moe share unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S --ranking-file ~/.cache/mesh-llm/moe-rankings/local-gemma-4-26b-a4b-it-ud-q4_k_s.micro-p8-t128-all.csv
 ```
 
 Behavior:

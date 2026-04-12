@@ -301,14 +301,32 @@ pub(crate) fn local_submit_ranking(
 }
 
 fn infer_analyzer_from_ranking_path(path: &Path) -> Option<&'static str> {
-    let text = path.to_string_lossy();
+    let text = path.to_string_lossy().to_ascii_lowercase();
     if text.contains("/full-v1/") || text.contains("\\full-v1\\") {
-        Some("full-v1")
-    } else if text.contains("/micro-v1/") || text.contains("\\micro-v1\\") {
-        Some("micro-v1")
-    } else {
-        None
+        return Some("full-v1");
     }
+    if text.contains("/micro-v1/") || text.contains("\\micro-v1\\") {
+        return Some("micro-v1");
+    }
+
+    let file_name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    if file_name.contains("micro-v1") {
+        return Some("micro-v1");
+    }
+    if file_name.contains("full-v1") {
+        return Some("full-v1");
+    }
+    if file_name.starts_with("local-")
+        && file_name.contains(".micro-p")
+        && file_name.ends_with(".csv")
+    {
+        return Some("micro-v1");
+    }
+    if file_name.starts_with("local-") && file_name.ends_with(".csv") {
+        return Some("full-v1");
+    }
+
+    None
 }
 
 fn sibling_metadata_path(path: &Path) -> Option<PathBuf> {
@@ -976,6 +994,14 @@ mod tests {
         );
         assert_eq!(
             infer_analyzer_from_ranking_path(Path::new("/tmp/a/full-v1/ranking.csv")),
+            Some("full-v1")
+        );
+        assert_eq!(
+            infer_analyzer_from_ranking_path(Path::new("/tmp/local-demo.micro-p8-t128-all.csv")),
+            Some("micro-v1")
+        );
+        assert_eq!(
+            infer_analyzer_from_ranking_path(Path::new("/tmp/local-demo.csv")),
             Some("full-v1")
         );
     }

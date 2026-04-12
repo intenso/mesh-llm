@@ -33,7 +33,7 @@ pub(crate) enum MoeCommand {
         /// Model spec: local path, catalog name, HF exact ref, HF repo selector like `org/repo:BF16@main`, or HF URL.
         model: String,
         /// Override the ranking CSV path instead of resolving a local cached artifact.
-        /// The path must include `micro-v1` or `full-v1` so mesh-llm can infer the analyzer id.
+        /// This should point to a ranking CSV, such as a file produced by `mesh-llm moe analyze`.
         #[arg(long)]
         ranking_file: Option<PathBuf>,
         /// Published dataset repo used for duplicate checks and PR target reporting.
