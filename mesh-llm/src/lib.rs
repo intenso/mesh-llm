@@ -23,7 +23,6 @@ use anyhow::Result;
 
 pub const VERSION: &str = "0.60.0-rc.1";
 
-/// Run the mesh-llm runtime entrypoint used by the binary wrapper.
 pub async fn run() -> Result<()> {
     runtime::run().await
 }
