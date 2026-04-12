@@ -1354,13 +1354,7 @@ pub async fn election_loop(
             if matches!(
                 moe_runtime_options.ranking_strategy,
                 moe::MoeRankingStrategy::Auto
-            ) && crate::system::moe_planner::resolve_runtime_ranking(
-                &model,
-                crate::system::moe_planner::DEFAULT_MOE_RANKINGS_DATASET,
-            )
-            .ok()
-            .flatten()
-            .is_none()
+            ) && moe::best_shared_ranking_artifact(&model).is_none()
             {
                 wait_for_peer_moe_ranking(
                     &model_name,

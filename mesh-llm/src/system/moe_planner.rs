@@ -123,6 +123,7 @@ pub(crate) async fn plan_moe(args: MoePlanArgs) -> Result<MoePlanReport> {
     let feasible = recommended_nodes <= max_supported_nodes;
 
     let ranking_vec = moe::load_cached_ranking(&ranking.path)
+        .ok_or_else(|| anyhow::anyhow!("cached ranking not found: {}", ranking.path.display()))
         .with_context(|| format!("Load ranking {}", ranking.path.display()))?;
     let assignments = moe::compute_assignments_with_overlap(
         &ranking_vec,
@@ -264,7 +265,7 @@ pub(crate) fn local_submit_ranking(
         }
         let inferred = infer_analyzer_from_ranking_path(path).ok_or_else(|| {
             anyhow::anyhow!(
-                "Could not infer analyzer id from {}. Expected a path containing `micro-v1` or `full-v1`.",
+                "Could not infer analyzer id from {}. Use a ranking CSV produced by `mesh-llm moe analyze` or a path containing `micro-v1` or `full-v1`.",
                 path.display()
             )
         })?;
