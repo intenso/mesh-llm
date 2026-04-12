@@ -115,7 +115,7 @@ Pushing a `v*` tag triggers `.github/workflows/release.yml`, which:
 
 - Stable releases still use GitHub's `releases/latest` endpoint, so ordinary installs only see stable releases.
 - GitHub prereleases are excluded from `releases/latest`, so publishing `v0.X.0-rc.1` does not advertise that prerelease to older stable clients.
-- This change updates mesh-llm's version comparison to proper semver ordering, so a prerelease binary such as `0.X.0-rc.1` will correctly upgrade to `0.X.0`, `0.X.1`, or a newer release candidate.
+- This change updates mesh-llm's version comparison to proper semver ordering, so a prerelease binary such as `0.X.0-rc.1` will correctly upgrade to the eventual stable `0.X.0` release, or to a specific tagged release when you run `mesh-llm update --version vX.Y.Z`.
 - Older binaries that predate this change use a dot-splitting numeric comparison instead of semver. If one of those binaries somehow carries a prerelease version string such as `0.X.0-rc.1`, it can mis-order versions and may fail to recognize `0.X.0` or `0.X.1` as newer. In practice that only affects manually produced prerelease builds, because the old release tooling did not support `-rc.N` tags.
 - Result: the change is backward compatible for existing stable users, and it fixes updater behavior for official prerelease builds going forward.
 
