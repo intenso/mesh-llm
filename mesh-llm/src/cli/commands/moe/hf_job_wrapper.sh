@@ -71,19 +71,31 @@ echo "📥 Installing Hugging Face CLI"
 python3 -m pip install -q --no-cache-dir -U huggingface_hub hf_xet
 
 echo "📥 Downloading exact GGUF with hf"
-model_dir="$workdir/model"
-mkdir -p "$model_dir"
 export HF_XET_HIGH_PERFORMANCE=1
 export HF_XET_NUM_CONCURRENT_RANGE_GETS=64
 export HF_HUB_DISABLE_TELEMETRY=1
-MODEL_LOCAL_PATH="$(
-  hf download "$SOURCE_REPO" "$SOURCE_FILE" \
+
+download_hf_file() {
+  hf download "$SOURCE_REPO" "$1" \
     --repo-type model \
-    --revision "$SOURCE_REVISION" \
-    --local-dir "$model_dir"
-)"
-export MODEL_LOCAL_PATH
-echo "✅ Model downloaded to $MODEL_LOCAL_PATH"
+    --revision "$SOURCE_REVISION"
+}
+
+split_re='^(.*)-00001-of-([0-9]{5})\.gguf$'
+if [[ "${SOURCE_FILE}" =~ $split_re ]]; then
+  prefix="${BASH_REMATCH[1]}"
+  total="${BASH_REMATCH[2]}"
+  total_num=$((10#$total))
+  echo "🧩 Detected split GGUF: ${total_num} part(s)"
+  for ((i = 1; i <= total_num; i++)); do
+    shard="$(printf '%s-%05d-of-%s.gguf' "$prefix" "$i" "$total")"
+    echo "📥 Caching shard ${i}/${total_num}: $shard"
+    download_hf_file "$shard" >/dev/null
+  done
+else
+  download_hf_file "$SOURCE_FILE" >/dev/null
+fi
+echo "✅ Model cached in Hugging Face cache"
 
 echo "🧠 Running analyze step"
 stdbuf -oL -eL bash -lc '__ANALYZE_COMMAND__'

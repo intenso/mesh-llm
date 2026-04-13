@@ -123,7 +123,7 @@ impl RemoteAnalyzer {
                 context_size,
                 n_gpu_layers,
             } => format!(
-                "./mesh-llm moe analyze full \"$MODEL_LOCAL_PATH\" --context-size {} --n-gpu-layers {}",
+                "./mesh-llm moe analyze full \"$MODEL_REF\" --context-size {} --n-gpu-layers {}",
                 context_size, n_gpu_layers
             ),
             Self::Micro {
@@ -132,7 +132,7 @@ impl RemoteAnalyzer {
                 context_size,
                 n_gpu_layers,
             } => format!(
-                "./mesh-llm moe analyze micro \"$MODEL_LOCAL_PATH\" --prompt-count {} --token-count {} --context-size {} --n-gpu-layers {}",
+                "./mesh-llm moe analyze micro \"$MODEL_REF\" --prompt-count {} --token-count {} --context-size {} --n-gpu-layers {}",
                 prompt_count,
                 token_count,
                 context_size,
