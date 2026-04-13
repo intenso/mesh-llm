@@ -13,10 +13,10 @@ message PeerAnnouncement {
   NodeRole role = 2;
   optional uint32 http_port = 3;
   optional string version = 4;
-  optional string gpu_name = 5;                      // Deprecated in v0.60.0: prefer gpus[].name
+  optional string gpu_name = 5;                      // Deprecated in v0.60.0: prefer hardware.gpus[].name
   optional string hostname = 6;                      // Deprecated in v0.60.0: prefer hardware.hostname
   optional bool is_soc = 7;                          // Deprecated in v0.60.0: prefer hardware.is_soc; true for system-on-chip / unified-memory hosts such as Apple Silicon and Jetson
-  optional string gpu_vram = 8;                      // Deprecated in v0.60.0: prefer gpus[].vram_bytes
+  optional string gpu_vram = 8;                      // Deprecated in v0.60.0: prefer hardware.gpus[].vram_bytes
   repeated string available_models = 9;              // Deprecated in v0.55.0 for protobuf gossip; compatibility surface only
   repeated string serving_models = 10;               // Deprecated in v0.55.0: prefer served_model_identities and served_model_runtime
   repeated string requested_models = 11;
