@@ -20,9 +20,11 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  # repository_owner preserves GitHub org casing (e.g. "Mesh-LLM") but OCI
-  # registries require fully-lowercase image references.
-  IMAGE_NAME: mesh-llm/mesh-llm
+  # `github.repository` preserves GitHub org/repo casing, but OCI registries
+  # require fully-lowercase image references. Allow forks and renamed repos
+  # to override this with a lowercase repo/org Actions variable while keeping
+  # the current upstream path as the default.
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'mesh-llm/mesh-llm' }}
 
 permissions:
   contents: read
