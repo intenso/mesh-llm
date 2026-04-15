@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::local::{
     direct_hf_cache_root_gguf_paths, gguf_metadata_cache_path, huggingface_hub_cache,
-    huggingface_hub_cache_dir,
+    huggingface_hub_cache_dir, scan_hf_cache_info,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -115,11 +115,7 @@ fn local_gguf_paths() -> Vec<PathBuf> {
         }
 
         let cache = huggingface_hub_cache();
-        let cache_info = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()
-            .and_then(|runtime| runtime.block_on(hf_hub::cache::scan_cache_dir(&cache)).ok());
+        let cache_info = scan_hf_cache_info(&cache);
         if let Some(cache_info) = cache_info {
             for repo in &cache_info.repos {
                 if repo.repo_type != hf_hub::RepoType::Model {

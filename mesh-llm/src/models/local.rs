@@ -70,12 +70,21 @@ pub(crate) fn huggingface_snapshot_path(
         .join(revision)
 }
 
-fn scan_hf_cache_info(cache_root: &Path) -> Option<HFCacheInfo> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    runtime.block_on(scan_cache_dir(cache_root)).ok()
+pub(crate) fn scan_hf_cache_info(cache_root: &Path) -> Option<HFCacheInfo> {
+    let cache_root = cache_root.to_path_buf();
+    let scan = move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        runtime.block_on(scan_cache_dir(&cache_root)).ok()
+    };
+
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::spawn(scan).join().ok().flatten()
+    } else {
+        scan()
+    }
 }
 
 fn cache_repo_id(repo: &CachedRepoInfo) -> Option<&str> {

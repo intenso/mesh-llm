@@ -2538,8 +2538,9 @@ fn build_serving_list(resolved_models: &[PathBuf], model_name: &str) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::local::{huggingface_repo_folder_name, huggingface_snapshot_path};
     use crate::system::hardware::GpuFacts;
-    use hf_hub::{Cache, Repo, RepoType};
+    use hf_hub::RepoType;
     use serial_test::serial;
     use std::path::Path;
     use std::path::PathBuf;
@@ -2596,16 +2597,11 @@ mod tests {
         std::env::remove_var("HF_HOME");
         std::env::remove_var("XDG_CACHE_HOME");
 
-        let cache = Cache::new(cache_root.clone());
-        let repo = Repo::with_revision(
-            "bartowski/Llama-3.2-1B-Instruct-GGUF".to_string(),
-            RepoType::Model,
-            "main".to_string(),
-        );
-        let cache_repo = cache.repo(repo);
-        cache_repo.create_ref("test-commit").unwrap();
-        let model_path = cache_repo
-            .pointer_path("test-commit")
+        let repo_id = "bartowski/Llama-3.2-1B-Instruct-GGUF";
+        let repo_dir = cache_root.join(huggingface_repo_folder_name(repo_id, RepoType::Model));
+        std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
+        std::fs::write(repo_dir.join("refs").join("main"), "test-commit").unwrap();
+        let model_path = huggingface_snapshot_path(repo_id, RepoType::Model, "test-commit")
             .join("Llama-3.2-1B-Instruct-Q4_K_M.gguf");
         std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
         std::fs::write(&model_path, b"gguf").unwrap();
@@ -2640,16 +2636,11 @@ mod tests {
         std::env::remove_var("HF_HOME");
         std::env::remove_var("XDG_CACHE_HOME");
 
-        let cache = Cache::new(cache_root.clone());
-        let repo = Repo::with_revision(
-            "someone/Custom-GGUF".to_string(),
-            RepoType::Model,
-            "main".to_string(),
-        );
-        let cache_repo = cache.repo(repo);
-        cache_repo.create_ref("test-commit").unwrap();
-        let model_path = cache_repo
-            .pointer_path("test-commit")
+        let repo_id = "someone/Custom-GGUF";
+        let repo_dir = cache_root.join(huggingface_repo_folder_name(repo_id, RepoType::Model));
+        std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
+        std::fs::write(repo_dir.join("refs").join("main"), "test-commit").unwrap();
+        let model_path = huggingface_snapshot_path(repo_id, RepoType::Model, "test-commit")
             .join("Custom-Model-Q4_K_M.gguf");
         std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
         std::fs::write(&model_path, b"gguf").unwrap();
