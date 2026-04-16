@@ -584,6 +584,10 @@ pub fn installed_model_display_name(model_name: &str) -> String {
         .unwrap_or_else(|| model_name.to_string())
 }
 
+pub fn installed_model_huggingface_ref(identity: &HuggingFaceModelIdentity) -> String {
+    format_huggingface_display_ref(&identity.repo_id, None, &identity.file)
+}
+
 pub(super) fn catalog_hf_asset_ref(
     model: &'static catalog::CatalogModel,
     file_name: &str,

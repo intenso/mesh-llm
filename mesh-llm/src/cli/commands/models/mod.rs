@@ -114,7 +114,7 @@ pub fn run_model_installed(json_output: bool) -> Result<()> {
             let model_ref = if let Some(model) = catalog_model {
                 model.name.clone()
             } else if let Some(identity) = crate::models::huggingface_identity_for_path(&path) {
-                format!("{}/{}", identity.repo_id, identity.file)
+                crate::models::installed_model_huggingface_ref(&identity)
             } else {
                 name.clone()
             };
