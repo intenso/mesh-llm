@@ -1,11 +1,13 @@
 use super::formatters::{
-    catalog_model_capabilities, display_width, filter_label, fit_hint_for_size_label, format_count,
+    catalog_model_capabilities, filter_label, fit_hint_for_size_label, format_count,
     format_installed_size, format_source_label, huggingface_cache_dir, huggingface_repo_url,
-    installed_model_kind, model_kind_code, pad_left_display, pad_right_display, sort_label,
-    variant_selector_label, ConsoleFormatter, InstalledRow, ModelsFormatter, SearchFormatter,
+    installed_model_kind, model_kind_code, sort_label, variant_selector_label, ConsoleFormatter,
+    InstalledRow, ModelsFormatter, SearchFormatter,
 };
 use crate::models::{catalog, ModelDetails, SearchArtifactFilter, SearchHit, SearchSort};
 use anyhow::Result;
+use std::io::Write;
+use tabwriter::TabWriter;
 
 impl SearchFormatter for ConsoleFormatter {
     fn is_json(&self) -> bool {
@@ -298,49 +300,22 @@ impl ModelsFormatter for ConsoleFormatter {
                         selected,
                     ));
                 }
-                let sel_width = 3usize;
-                let quant_width = rows
-                    .iter()
-                    .map(|(quant, _, _, _, _)| display_width(quant))
-                    .max()
-                    .unwrap_or(5)
-                    .max(display_width("quant"));
-                let size_width = rows
-                    .iter()
-                    .map(|(_, size, _, _, _)| display_width(size))
-                    .max()
-                    .unwrap_or(4)
-                    .max(display_width("size"));
-                let fit_width = rows
-                    .iter()
-                    .map(|(_, _, fit, _, _)| display_width(fit))
-                    .max()
-                    .unwrap_or(3)
-                    .max(display_width("fit"));
-                println!(
-                    "{}  {}  {}  {}  ref",
-                    pad_right_display("sel", sel_width),
-                    pad_right_display("quant", quant_width),
-                    pad_left_display("size", size_width),
-                    pad_right_display("fit", fit_width)
-                );
-                println!(
-                    "{}  {}  {}  {}  ---",
-                    "-".repeat(sel_width),
-                    "-".repeat(quant_width),
-                    "-".repeat(size_width),
-                    "-".repeat(fit_width)
-                );
+                let mut table = TabWriter::new(Vec::new()).padding(2);
+                writeln!(&mut table, "sel\tquant\tsize\tfit\tref")?;
+                writeln!(&mut table, "---\t-----\t----\t---\t---")?;
                 for (quant, size, fit, r#ref, selected) in rows {
-                    println!(
-                        "{}  {}  {}  {}  {}",
-                        pad_right_display(if selected { "*" } else { " " }, sel_width),
-                        pad_right_display(&quant, quant_width),
-                        pad_left_display(&size, size_width),
-                        pad_right_display(&fit, fit_width),
+                    writeln!(
+                        &mut table,
+                        "{}\t{}\t{}\t{}\t{}",
+                        if selected { "*" } else { " " },
+                        quant,
+                        size,
+                        fit,
                         r#ref
-                    );
+                    )?;
                 }
+                table.flush()?;
+                print!("{}", String::from_utf8_lossy(&table.into_inner()?));
             }
         }
         Ok(())

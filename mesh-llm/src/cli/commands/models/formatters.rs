@@ -6,7 +6,6 @@ use crate::system::hardware;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use unicode_width::UnicodeWidthStr;
 
 pub(crate) trait SearchFormatter {
     fn is_json(&self) -> bool;
@@ -266,20 +265,6 @@ pub(crate) fn variant_selector_label(exact_ref: &str) -> String {
         .and_then(|value| value.to_str())
         .unwrap_or(exact_ref)
         .to_string()
-}
-
-pub(crate) fn display_width(value: &str) -> usize {
-    UnicodeWidthStr::width(value)
-}
-
-pub(crate) fn pad_right_display(value: &str, width: usize) -> String {
-    let pad = width.saturating_sub(display_width(value));
-    format!("{value}{}", " ".repeat(pad))
-}
-
-pub(crate) fn pad_left_display(value: &str, width: usize) -> String {
-    let pad = width.saturating_sub(display_width(value));
-    format!("{}{value}", " ".repeat(pad))
 }
 
 pub(crate) fn catalog_model_is_mlx(model: &catalog::CatalogModel) -> bool {
