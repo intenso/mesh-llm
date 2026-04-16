@@ -620,7 +620,6 @@ fn download_hf_assets_blocking(
             download_plan.insert((true, shard));
         }
     }
-
     if progress {
         eprintln!("📥 Ensuring {} is available locally...", label);
     }
