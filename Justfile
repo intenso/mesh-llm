@@ -75,41 +75,6 @@ release-build-vulkan:
 release-build-vulkan-windows:
     @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Backend vulkan
 
-# Bump release version consistently across source and Cargo manifests.
-release-version version:
-    @scripts/release-version.sh "{{ version }}"
-
-# Releases are now orchestrated by the GitHub Actions Release workflow.
-release version:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tag="{{ version }}"
-    if [[ "$tag" != v* ]]; then
-        tag="v$tag"
-    fi
-    echo "Releases are now created by the GitHub Actions Release workflow." >&2
-    echo "Run it with:" >&2
-    echo "  gh workflow run release.yml -f version=$tag -f prerelease=false -f target_ref=main" >&2
-    exit 1
-
-# Prereleases are now orchestrated by the GitHub Actions Release workflow.
-prerelease version:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tag="{{ version }}"
-    if [[ "$tag" != v* ]]; then
-        tag="v$tag"
-    fi
-    current_branch="$(git branch --show-current)"
-    if [[ -z "$current_branch" ]]; then
-        echo "Error: prerelease workflow dispatch needs a branch, not detached HEAD." >&2
-        exit 1
-    fi
-    echo "Prereleases are now created by the GitHub Actions Release workflow." >&2
-    echo "Run it with:" >&2
-    echo "  gh workflow run release.yml -f version=$tag -f prerelease=true -f target_ref=$current_branch" >&2
-    exit 1
-
 # Download the default model (GLM-4.7-Flash Q4_K_M, 17GB)
 download-model:
     #!/usr/bin/env bash

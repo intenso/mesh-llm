@@ -12,11 +12,15 @@ on:
         required: true
         default: false
         type: boolean
-      target_ref:
-        description: Branch or ref to release from
+      target_branch:
+        description: Branch to release from
         required: true
         default: main
         type: string
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -33,7 +37,7 @@ jobs:
       tag: ${{ steps.release_meta.outputs.tag }}
       version: ${{ steps.release_meta.outputs.version }}
       prerelease: ${{ steps.release_meta.outputs.prerelease }}
-      target_ref: ${{ steps.release_meta.outputs.target_ref }}
+      target_branch: ${{ steps.release_meta.outputs.target_branch }}
       release_sha: ${{ steps.release_commit.outputs.release_sha }}
 
     steps:
@@ -42,7 +46,7 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_PRERELEASE: ${{ inputs.prerelease }}
-          INPUT_TARGET_REF: ${{ inputs.target_ref }}
+          INPUT_TARGET_BRANCH: ${{ inputs.target_branch }}
         shell: bash
         run: |
           set -euo pipefail
@@ -55,15 +59,25 @@ jobs:
 
           tag="v$version"
           prerelease="${INPUT_PRERELEASE}"
-          target_ref="${INPUT_TARGET_REF}"
+          target_branch="${INPUT_TARGET_BRANCH}"
 
           if [[ "$prerelease" != "true" && "$prerelease" != "false" ]]; then
             echo "Invalid prerelease flag: $prerelease" >&2
             exit 1
           fi
 
-          if [[ "$prerelease" == "false" && "$target_ref" != "main" ]]; then
-            echo "Stable releases must target main (got: $target_ref)" >&2
+          if [[ -z "$target_branch" || "$target_branch" == refs/* ]]; then
+            echo "target_branch must be a plain branch name under origin/ (got: $target_branch)" >&2
+            exit 1
+          fi
+
+          if ! git check-ref-format --branch "$target_branch" >/dev/null 2>&1; then
+            echo "Invalid branch name: $target_branch" >&2
+            exit 1
+          fi
+
+          if [[ "$prerelease" == "false" && "$target_branch" != "main" ]]; then
+            echo "Stable releases must target main (got: $target_branch)" >&2
             exit 1
           fi
 
@@ -81,12 +95,12 @@ jobs:
             echo "tag=$tag"
             echo "version=$version"
             echo "prerelease=$prerelease"
-            echo "target_ref=$target_ref"
+            echo "target_branch=$target_branch"
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v5
         with:
-          ref: ${{ steps.release_meta.outputs.target_ref }}
+          ref: ${{ steps.release_meta.outputs.target_branch }}
           fetch-depth: 0
 
       - uses: taiki-e/install-action@just
@@ -104,12 +118,12 @@ jobs:
       - name: Verify release invariants
         run: just check-release
 
-      - name: Ensure target ref is a branch
+      - name: Ensure target branch exists on origin
         shell: bash
         run: |
           set -euo pipefail
-          if ! git show-ref --verify --quiet "refs/remotes/origin/${{ steps.release_meta.outputs.target_ref }}"; then
-            echo "Target ref must resolve to a remote branch under origin/ (got: ${{ steps.release_meta.outputs.target_ref }})" >&2
+          if ! git show-ref --verify --quiet "refs/remotes/origin/${{ steps.release_meta.outputs.target_branch }}"; then
+            echo "target_branch must resolve to a remote branch under origin/ (got: ${{ steps.release_meta.outputs.target_branch }})" >&2
             exit 1
           fi
 
@@ -132,7 +146,7 @@ jobs:
         id: release_commit
         env:
           TAG: ${{ steps.release_meta.outputs.tag }}
-          TARGET_REF: ${{ steps.release_meta.outputs.target_ref }}
+          TARGET_BRANCH: ${{ steps.release_meta.outputs.target_branch }}
           PRERELEASE: ${{ steps.release_meta.outputs.prerelease }}
         shell: bash
         run: |
@@ -141,7 +155,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git checkout -B "$TARGET_REF" "origin/$TARGET_REF"
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
 
           scripts/release-version.sh "$TAG"
           git add -A
@@ -158,7 +172,7 @@ jobs:
           fi
 
           git tag "$TAG"
-          git push origin "HEAD:$TARGET_REF"
+          git push origin "HEAD:$TARGET_BRANCH"
           git push origin "$TAG"
 
           echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"

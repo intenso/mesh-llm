@@ -79,26 +79,27 @@ rm -rf /tmp/test-bundle
 ### 5. Release
 
 ```bash
-gh workflow run release.yml -f version=v0.X.0 -f prerelease=false -f target_ref=main
+gh workflow run release.yml -f version=v0.X.0 -f prerelease=false -f target_branch=main
 ```
 
-The Release workflow is now the source of truth for stable releases. It checks out `main`, runs the release consistency checks, bumps the version in source + Cargo manifests, refreshes `Cargo.lock` without upgrading dependencies, creates the release commit, creates and pushes the release tag, builds the release artifacts, publishes the GitHub release, and then publishes `mesh-llm-client` and `mesh-api` to crates.io.
+The Release workflow is now the source of truth for stable releases. It checks out `main`, runs the release consistency checks, bumps the version in source + Cargo manifests, refreshes `Cargo.lock` without upgrading dependencies, creates the release commit directly on `main`, creates and pushes the release tag, builds the release artifacts, publishes the GitHub release, and then publishes `mesh-llm-client` and `mesh-api` to crates.io.
 
 On native Windows, `just check-release` still runs the Rust/docs/workflow invariant checks, but it skips the Bash-only `install.sh` and `scripts/package-release.sh` parity checks. Run the release-target parity check on macOS or Linux before cutting a tag if you need full shell-script coverage.
 
 ### 5a. Prerelease
 
 ```bash
-gh workflow run release.yml -f version=v0.X.0-rc.1 -f prerelease=true -f target_ref=feature/your-branch
+gh workflow run release.yml -f version=v0.X.0-rc.1 -f prerelease=true -f target_branch=feature/your-branch
 ```
 
-The same Release workflow handles prereleases. Set `prerelease=true` and provide the branch you want to cut the prerelease from. The workflow creates the prerelease commit on that branch, pushes the branch update, creates and pushes the prerelease tag, builds the artifacts, and publishes a GitHub prerelease. It skips crates.io publishing for prerelease tags.
+The same Release workflow handles prereleases. Set `prerelease=true` and provide the branch you want to cut the prerelease from. The workflow creates the prerelease commit directly on that branch, pushes the branch update, creates and pushes the prerelease tag, builds the artifacts, and publishes a GitHub prerelease. It skips crates.io publishing for prerelease tags.
 
 ### 6. Let GitHub Actions build and publish the release
 
 Running `.github/workflows/release.yml` via `workflow_dispatch` triggers the release flow, which:
 
 - creates and pushes the release commit and tag before any build jobs start
+- serializes releases so two manual runs cannot race each other
 - builds release bundles on macOS, Linux CPU, Linux ARM64 CPU, Linux CUDA, Linux ROCm, and Linux Vulkan
 - keeps the Windows publish block commented out for now, so GitHub release publishing does not currently upload Windows bundles
 - still leaves the local Windows bundle recipes available in `Justfile` for manual builds
@@ -139,6 +140,7 @@ After the workflow finishes, verify:
 - The default Linux release bundle is a generic CPU build.
 - Windows source builds exist, and the `*-windows` release recipes in `Justfile` still generate local `.zip` artifacts.
 - The workflow is now responsible for creating and pushing release tags; pushing a tag manually does not trigger a release build anymore.
+- The workflow mutates the target branch by creating and pushing the release commit before it starts the build matrix.
 - Tagged GitHub releases do not currently publish Windows bundles because the Windows release job remains commented out in `.github/workflows/release.yml`.
 - Release bundles use flavor-specific `rpc-server-<flavor>` and `llama-server-<flavor>` names so multiple flavors can coexist in one install directory. Use `mesh-llm --llama-flavor <flavor>` to force a specific pair.
 - The CUDA Linux release bundle is built in CI with an explicit multi-arch `CMAKE_CUDA_ARCHITECTURES` list and is not runtime-tested during the workflow.
