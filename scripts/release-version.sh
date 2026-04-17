@@ -61,12 +61,30 @@ update_manifest_version() {
     printf '%s\n' "$after" >"$file"
 }
 
+update_mesh_client_dependency_version() {
+    local file="$1"
+    local next="$2"
+    local before
+    local after
+    before="$(cat "$file")"
+    after="$(perl -0777 -pe 's/(mesh-client\s*=\s*\{[^}]*package\s*=\s*"mesh-llm-client"[^}]*version\s*=\s*")[^"]+(")/${1}'"$next"'$2/s' "$file")"
+    if [[ "$before" == "$after" ]]; then
+        return
+    fi
+    printf '%s\n' "$after" >"$file"
+}
+
 manifests=()
 while IFS= read -r manifest; do
     manifests+=("$manifest")
 done < <(
     cd "$REPO_ROOT"
-    git ls-files 'mesh-llm/Cargo.toml' 'mesh-llm/**/Cargo.toml' | sort -u
+    git ls-files \
+        'mesh-llm/Cargo.toml' \
+        'mesh-llm/**/Cargo.toml' \
+        'mesh-api/Cargo.toml' \
+        'mesh-client/Cargo.toml' \
+        | sort -u
 )
 
 if [[ "${#manifests[@]}" -eq 0 ]]; then
@@ -85,6 +103,7 @@ for relative_manifest in "${manifests[@]}"; do
     manifest="$REPO_ROOT/$relative_manifest"
     require_file "$manifest"
     update_manifest_version "$manifest" "$version"
+    update_mesh_client_dependency_version "$manifest" "$version"
     versioned_files+=("$manifest")
 done
 

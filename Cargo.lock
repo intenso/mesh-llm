@@ -3057,7 +3057,7 @@ name = "mesh-api"
 version = "0.1.0"
 dependencies = [
  "hex",
- "mesh-client",
+ "mesh-llm-client",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -3071,33 +3071,6 @@ dependencies = [
  "pollster",
  "thiserror 2.0.18",
  "uniffi",
-]
-
-[[package]]
-name = "mesh-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "crypto_box",
- "ed25519-dalek",
- "hex",
- "httparse",
- "iroh",
- "nostr-sdk",
- "prost",
- "prost-build",
- "protoc-bin-vendored",
- "rand 0.9.2",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -3126,7 +3099,7 @@ dependencies = [
  "iroh",
  "keyring",
  "libc",
- "mesh-client",
+ "mesh-llm-client",
  "mesh-llm-plugin",
  "nostr-sdk",
  "prost",
@@ -3156,6 +3129,31 @@ dependencies = [
  "urlencoding",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "mesh-llm-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "crypto_box",
+ "ed25519-dalek",
+ "hex",
+ "httparse",
+ "iroh",
+ "nostr-sdk",
+ "prost",
+ "rand 0.9.2",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -7,6 +7,7 @@
 - `cargo` installed (packaged with rust)
 - `gh` CLI authenticated (`gh auth status`)
 - llama.cpp fork cloned (`just build` does this automatically)
+- `CARGO_REGISTRY_TOKEN` GitHub Actions secret configured if you want tagged stable releases to publish `mesh-llm-client` and `mesh-api` to crates.io
 
 ## Steps
 
@@ -110,6 +111,8 @@ Pushing a `v*` tag triggers `.github/workflows/release.yml`, which:
 - keeps the legacy macOS `mesh-bundle.tar.gz` asset available for direct archive installs
 - creates the GitHub release automatically with generated notes
 - marks hyphenated tags such as `v0.X.0-rc.1` as GitHub prereleases
+- publishes `mesh-llm-client` and `mesh-api` to crates.io after the release succeeds on stable tags such as `v0.X.0`
+- skips crates.io publishing for prerelease tags such as `v0.X.0-rc.1`
 
 ### 6a. Autoupdater behavior and compatibility
 

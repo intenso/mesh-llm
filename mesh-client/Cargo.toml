@@ -1,7 +1,17 @@
 [package]
-name = "mesh-client"
+name = "mesh-llm-client"
 version = "0.1.0"
 edition = "2021"
+description = "Low-level Rust client implementation for Mesh LLM embedded integrations"
+license = "Apache-2.0"
+repository = "https://github.com/Mesh-LLM/mesh-llm"
+homepage = "https://github.com/Mesh-LLM/mesh-llm"
+readme = "README.md"
+keywords = ["llm", "mesh", "quic", "inference", "client"]
+categories = ["network-programming", "api-bindings"]
+
+[lib]
+name = "mesh_client"
 
 [features]
 host-io = []
@@ -30,10 +40,6 @@ uuid = { version = "1", features = ["v4"] }
 ed25519-dalek = { version = "=3.0.0-pre.1", features = ["rand_core"] }
 crypto_box = "0.9"
 rand = "0.9"
-
-[build-dependencies]
-prost-build = "0.14"
-protoc-bin-vendored = "3"
 
 [dev-dependencies]
 hex = "0.4"

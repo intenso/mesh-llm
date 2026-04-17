@@ -5,13 +5,8 @@ pub mod inference;
 pub mod mesh;
 pub mod models;
 pub mod network;
+pub mod proto;
 pub mod runtime;
-
-pub mod proto {
-    pub mod node {
-        include!(concat!(env!("OUT_DIR"), "/meshllm.node.v1.rs"));
-    }
-}
 
 pub mod crypto;
 pub mod events;
