@@ -94,10 +94,10 @@ gh workflow run release.yml -f version=v0.X.0-rc.1 -f prerelease=true -f target_
 
 The same Release workflow handles prereleases. Set `prerelease=true` and provide the branch you want to cut the prerelease from. The workflow creates the prerelease commit directly on that branch, pushes the branch update, creates and pushes the prerelease tag, builds the artifacts, and publishes a GitHub prerelease.
 
-If you want a faster prerelease cut without the Linux CUDA and ROCm bundles, add:
+If you want a faster prerelease cut without the Linux CUDA, ROCm, and Vulkan bundles, add:
 
 ```bash
-gh workflow run release.yml -f version=v0.X.0-rc.1 -f prerelease=true -f skip_cuda_rocm=true -f target_branch=feature/your-branch
+gh workflow run release.yml -f version=v0.X.0-rc.1 -f prerelease=true -f skip_gpu_bundles=true -f target_branch=feature/your-branch
 ```
 
 That flag is prerelease-only. Stable releases must continue to publish the full Linux CPU, ARM64 CPU, CUDA, ROCm, and Vulkan set.
@@ -108,8 +108,8 @@ Running `.github/workflows/release.yml` via `workflow_dispatch` triggers the rel
 
 - creates and pushes the release commit and tag before any build jobs start
 - serializes releases so two manual runs cannot race each other
-- builds release bundles on macOS, Linux CPU, Linux ARM64 CPU, and Linux Vulkan
-- also builds Linux CUDA and Linux ROCm unless `skip_cuda_rocm=true` is set on a prerelease run
+- builds release bundles on macOS, Linux CPU, and Linux ARM64 CPU
+- also builds Linux CUDA, Linux ROCm, and Linux Vulkan unless `skip_gpu_bundles=true` is set on a prerelease run
 - keeps the Windows publish block commented out for now, so GitHub release publishing does not currently upload Windows bundles
 - still leaves the local Windows bundle recipes available in `Justfile` for manual builds
 - uploads versioned assets such as `mesh-llm-v0.X.0-aarch64-apple-darwin.tar.gz`
@@ -138,9 +138,9 @@ After the workflow finishes, verify:
 - `mesh-llm-aarch64-apple-darwin.tar.gz` exists
 - `mesh-llm-aarch64-unknown-linux-gnu.tar.gz` exists
 - `mesh-llm-x86_64-unknown-linux-gnu.tar.gz` exists
-- `mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz` exists
-- `mesh-llm-x86_64-unknown-linux-gnu-cuda.tar.gz` exists unless this was a prerelease with `skip_cuda_rocm=true`
-- `mesh-llm-x86_64-unknown-linux-gnu-rocm.tar.gz` exists unless this was a prerelease with `skip_cuda_rocm=true`
+- `mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz` exists unless this was a prerelease with `skip_gpu_bundles=true`
+- `mesh-llm-x86_64-unknown-linux-gnu-cuda.tar.gz` exists unless this was a prerelease with `skip_gpu_bundles=true`
+- `mesh-llm-x86_64-unknown-linux-gnu-rocm.tar.gz` exists unless this was a prerelease with `skip_gpu_bundles=true`
 - Windows release bundles are not expected from the current GitHub Actions workflow while the publish block stays commented out
 
 ## Notes
@@ -152,7 +152,7 @@ After the workflow finishes, verify:
 - The workflow mutates the target branch by creating and pushing the release commit before it starts the build matrix.
 - Tagged GitHub releases do not currently publish Windows bundles because the Windows release job remains commented out in `.github/workflows/release.yml`.
 - Release bundles use flavor-specific `rpc-server-<flavor>` and `llama-server-<flavor>` names so multiple flavors can coexist in one install directory. Use `mesh-llm --llama-flavor <flavor>` to force a specific pair.
-- Prereleases can optionally skip the Linux CUDA and ROCm bundles via the `skip_cuda_rocm=true` workflow input. Those tags will not be installable or updatable on CUDA/ROCm bundle installs until a later prerelease or stable release publishes matching assets.
+- Prereleases can optionally skip the Linux CUDA, ROCm, and Vulkan bundles via the `skip_gpu_bundles=true` workflow input. Those tags will not be installable or updatable on CUDA/ROCm/Vulkan bundle installs until a later prerelease or stable release publishes matching assets.
 - The CUDA Linux release bundle is built in CI with an explicit multi-arch `CMAKE_CUDA_ARCHITECTURES` list and is not runtime-tested during the workflow.
 - The ROCm and Vulkan Linux release bundles are compile-tested in CI, but not runtime-tested against real GPUs during the workflow.
 - `codesign` and `xattr` may be needed on the receiving machine if macOS Gatekeeper blocks unsigned binaries:
