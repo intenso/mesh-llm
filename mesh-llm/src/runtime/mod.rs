@@ -859,8 +859,21 @@ fn startup_rpc_backend_device<'a>(
         .map(|gpu| gpu.backend_device.as_str());
 
     if let (Some(cli_device), Some(pinned_device)) = (cli_device, pinned_device) {
+        let is_match = cli_device == pinned_device;
+        let is_lenient_match = is_match || {
+            let is_amd_cli = cli_device.starts_with("ROCm") || cli_device.starts_with("HIP");
+            let is_amd_pinned = pinned_device.starts_with("ROCm") || pinned_device.starts_with("HIP");
+            if is_amd_cli && is_amd_pinned {
+                let cli_idx = cli_device.trim_start_matches("ROCm").trim_start_matches("HIP");
+                let pinned_idx = pinned_device.trim_start_matches("ROCm").trim_start_matches("HIP");
+                cli_idx == pinned_idx && !cli_idx.is_empty()
+            } else {
+                false
+            }
+        };
+
         anyhow::ensure!(
-            cli_device == pinned_device,
+            is_lenient_match,
             "explicit --device '{cli_device}' conflicts with pinned startup GPU backend device '{pinned_device}'"
         );
         return Ok(Some(cli_device));
@@ -3262,6 +3275,34 @@ mod tests {
         assert!(err
             .to_string()
             .contains("conflicts with pinned startup GPU backend device"));
+    }
+
+    #[test]
+    fn pinned_gpu_startup_rpc_device_allows_lenient_amd_match() {
+        let primary_startup_model = StartupModelPlan {
+            declared_ref: "Qwen3-8B-Q4_K_M".into(),
+            resolved_path: PathBuf::from("/tmp/Qwen3-8B-Q4_K_M.gguf"),
+            mmproj_path: None,
+            ctx_size: Some(8192),
+            gpu_id: Some("pci:0000:65:00.0".into()),
+            pinned_gpu: Some(StartupPinnedGpuTarget {
+                index: 0,
+                stable_id: "pci:0000:65:00.0".into(),
+                backend_device: "ROCm0".into(),
+                vram_bytes: 24_000_000_000,
+            }),
+        };
+
+        let device1 =
+            startup_rpc_backend_device(Some("HIP0"), Some(&primary_startup_model)).unwrap();
+        assert_eq!(device1, Some("HIP0"));
+
+        let mut model_hip = primary_startup_model.clone();
+        model_hip.pinned_gpu.as_mut().unwrap().backend_device = "HIP1".into();
+
+        let device2 =
+            startup_rpc_backend_device(Some("ROCm1"), Some(&model_hip)).unwrap();
+        assert_eq!(device2, Some("ROCm1"));
     }
 
     #[test]

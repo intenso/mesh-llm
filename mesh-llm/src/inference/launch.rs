@@ -66,7 +66,7 @@ impl BinaryFlavor {
         match self {
             BinaryFlavor::Cpu => &["CPU"],
             BinaryFlavor::Cuda => &["CUDA0", "CPU"],
-            BinaryFlavor::Rocm => &["ROCm0", "CPU"],
+            BinaryFlavor::Rocm => &["ROCm0", "HIP0", "CPU"],
             BinaryFlavor::Vulkan => &["Vulkan0", "CPU"],
             BinaryFlavor::Metal => &["MTL0", "CPU"],
         }
@@ -659,7 +659,7 @@ fn preferred_device(available: &[String], flavor: Option<BinaryFlavor>) -> Optio
     let candidates: &[&str] = if let Some(flavor) = flavor {
         flavor.preferred_devices()
     } else {
-        &["MTL0", "CUDA0", "ROCm0", "Vulkan0", "CPU"]
+        &["MTL0", "CUDA0", "ROCm0", "HIP0", "Vulkan0", "CPU"]
     };
 
     for candidate in candidates {
@@ -678,7 +678,24 @@ fn resolve_device_for_binary(
     let available = probe_available_devices(binary);
 
     if let Some(device) = requested {
-        if !available.is_empty() && !available.iter().any(|candidate| candidate == device) {
+        if !available.is_empty() {
+            if available.iter().any(|candidate| candidate == device) {
+                return Ok(device.to_string());
+            }
+            
+            // Dual support for ROCm/HIP transition
+            let is_amd_requested = device.starts_with("ROCm") || device.starts_with("HIP");
+            if is_amd_requested {
+                let alt_device = if device.starts_with("ROCm") {
+                    device.replace("ROCm", "HIP")
+                } else {
+                    device.replace("HIP", "ROCm")
+                };
+                if available.iter().any(|candidate| candidate == &alt_device) {
+                    return Ok(alt_device);
+                }
+            }
+
             anyhow::bail!(
                 "requested device {device} is not supported by {}. Available devices: {}",
                 binary.display(),
