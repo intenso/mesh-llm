@@ -862,10 +862,15 @@ fn startup_rpc_backend_device<'a>(
         let is_match = cli_device == pinned_device;
         let is_lenient_match = is_match || {
             let is_amd_cli = cli_device.starts_with("ROCm") || cli_device.starts_with("HIP");
-            let is_amd_pinned = pinned_device.starts_with("ROCm") || pinned_device.starts_with("HIP");
+            let is_amd_pinned =
+                pinned_device.starts_with("ROCm") || pinned_device.starts_with("HIP");
             if is_amd_cli && is_amd_pinned {
-                let cli_idx = cli_device.trim_start_matches("ROCm").trim_start_matches("HIP");
-                let pinned_idx = pinned_device.trim_start_matches("ROCm").trim_start_matches("HIP");
+                let cli_idx = cli_device
+                    .trim_start_matches("ROCm")
+                    .trim_start_matches("HIP");
+                let pinned_idx = pinned_device
+                    .trim_start_matches("ROCm")
+                    .trim_start_matches("HIP");
                 cli_idx == pinned_idx && !cli_idx.is_empty()
             } else {
                 false
@@ -3300,8 +3305,7 @@ mod tests {
         let mut model_hip = primary_startup_model.clone();
         model_hip.pinned_gpu.as_mut().unwrap().backend_device = "HIP1".into();
 
-        let device2 =
-            startup_rpc_backend_device(Some("ROCm1"), Some(&model_hip)).unwrap();
+        let device2 = startup_rpc_backend_device(Some("ROCm1"), Some(&model_hip)).unwrap();
         assert_eq!(device2, Some("ROCm1"));
     }
 

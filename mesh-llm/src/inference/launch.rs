@@ -682,7 +682,7 @@ fn resolve_device_for_binary(
             if available.iter().any(|candidate| candidate == device) {
                 return Ok(device.to_string());
             }
-            
+
             // Dual support for ROCm/HIP transition
             let is_amd_requested = device.starts_with("ROCm") || device.starts_with("HIP");
             if is_amd_requested {
