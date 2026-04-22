@@ -1,6 +1,7 @@
 use super::resolve::{
-    file_preference_score, is_known_gguf_sidecar, matching_catalog_model_for_huggingface,
-    merge_capabilities, quant_selector_from_gguf_file, remote_hf_size_label_with_api,
+    file_preference_score, gguf_variant_size_bytes_from_siblings, is_known_gguf_sidecar,
+    matching_catalog_model_for_huggingface, merge_capabilities, quant_selector_from_gguf_file,
+    remote_hf_size_label_with_api,
 };
 use super::ModelCapabilities;
 use super::{build_hf_tokio_api, capabilities, catalog};
@@ -358,10 +359,7 @@ fn size_label_from_sibling_entries(
     file: &str,
     siblings: &[(String, Option<u64>)],
 ) -> Option<String> {
-    siblings
-        .iter()
-        .find_map(|(name, size)| (name == file).then_some(*size).flatten())
-        .map(super::format_size_bytes)
+    gguf_variant_size_bytes_from_siblings(file, siblings).map(super::format_size_bytes)
 }
 
 fn collect_repo_artifact_candidates(siblings: &[String]) -> Vec<RepoArtifactCandidate> {
@@ -619,6 +617,29 @@ mod tests {
         assert_eq!(
             size_label_from_sibling_entries("model-q4.gguf", &siblings).as_deref(),
             Some("16.9GB")
+        );
+    }
+
+    #[test]
+    fn size_label_from_sibling_entries_sums_split_variant_sizes() {
+        let siblings = vec![
+            (
+                "IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00012.gguf".to_string(),
+                Some(6_912_800),
+            ),
+            (
+                "IQ3_K/Kimi-K2.6-IQ3_K-00002-of-00012.gguf".to_string(),
+                Some(45_004_320_032),
+            ),
+            (
+                "IQ3_K/Kimi-K2.6-IQ3_K-00003-of-00012.gguf".to_string(),
+                Some(45_669_680_480),
+            ),
+        ];
+        assert_eq!(
+            size_label_from_sibling_entries("IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00012.gguf", &siblings)
+                .as_deref(),
+            Some("90.7GB")
         );
     }
 

@@ -582,6 +582,28 @@ fn collect_show_gguf_variants_excludes_mmproj_and_nonfirst_split() {
 }
 
 #[test]
+fn collect_show_gguf_variants_uses_total_split_size() {
+    let siblings = vec![
+        (
+            "IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00012.gguf".to_string(),
+            Some(6_912_800),
+        ),
+        (
+            "IQ3_K/Kimi-K2.6-IQ3_K-00002-of-00012.gguf".to_string(),
+            Some(45_004_320_032),
+        ),
+        (
+            "IQ3_K/Kimi-K2.6-IQ3_K-00003-of-00012.gguf".to_string(),
+            Some(45_669_680_480),
+        ),
+    ];
+    let variants = collect_show_gguf_variants_from_siblings(&siblings, 0);
+    assert_eq!(variants.len(), 1);
+    assert_eq!(variants[0].0, "IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00012.gguf");
+    assert_eq!(variants[0].1, Some(90_680_913_312));
+}
+
+#[test]
 fn collect_show_gguf_variants_orders_by_fit_when_memory_known() {
     let siblings = vec![
         ("model-UD-Q5_K_M.gguf".to_string(), Some(21_200_000_000)),

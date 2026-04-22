@@ -7,6 +7,7 @@ use super::{
 use crate::cli::terminal_progress::start_spinner;
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::{ListModelsParams, RepoInfo, RepoInfoParams};
+use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1019,13 +1020,62 @@ pub(super) fn is_known_gguf_sidecar(file: &str) -> bool {
     basename.to_ascii_lowercase().starts_with("mmproj")
 }
 
+fn split_gguf_shard_info(file: &str) -> Option<(&str, &str, &str)> {
+    let stem = file.strip_suffix(".gguf")?;
+    let (prefix_and_part, total) = stem.rsplit_once("-of-")?;
+    if total.len() != 5 || !total.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let (prefix, part) = prefix_and_part.rsplit_once('-')?;
+    if part.len() != 5 || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((prefix, part, total))
+}
+
+fn is_split_gguf_first_shard(file: &str) -> bool {
+    split_gguf_shard_info(file)
+        .map(|(_, part, _)| part == "00001")
+        .unwrap_or(false)
+}
+
+fn split_gguf_variant_matches(file: &str, prefix: &str, total: &str) -> bool {
+    split_gguf_shard_info(file)
+        .map(|(candidate_prefix, _, candidate_total)| {
+            candidate_prefix == prefix && candidate_total == total
+        })
+        .unwrap_or(false)
+}
+
+pub(super) fn gguf_variant_size_bytes_from_siblings(
+    file: &str,
+    siblings: &[(String, Option<u64>)],
+) -> Option<u64> {
+    if let Some((prefix, _, total)) = split_gguf_shard_info(file) {
+        let mut total_bytes = 0u64;
+        let mut matched_any = false;
+        for (candidate, size) in siblings {
+            if !split_gguf_variant_matches(candidate, prefix, total) {
+                continue;
+            }
+            matched_any = true;
+            total_bytes = total_bytes.checked_add(size.as_ref().copied()?)?;
+        }
+        return matched_any.then_some(total_bytes);
+    }
+
+    siblings
+        .iter()
+        .find_map(|(candidate, size)| (candidate == file).then_some(*size).flatten())
+}
+
 fn collect_show_gguf_variants_from_siblings(
     siblings: &[(String, Option<u64>)],
     available_bytes: u64,
 ) -> Vec<(String, Option<u64>)> {
     let mut gguf_candidates: Vec<(String, Option<u64>)> = siblings
         .iter()
-        .filter_map(|(file, size)| {
+        .filter_map(|(file, _size)| {
             let lower = file.to_lowercase();
             if !lower.ends_with(".gguf") {
                 return None;
@@ -1033,10 +1083,13 @@ fn collect_show_gguf_variants_from_siblings(
             if is_known_gguf_sidecar(file) {
                 return None;
             }
-            if lower.contains("-000") && !lower.contains("-00001-of-") {
+            if split_gguf_shard_info(file).is_some() && !is_split_gguf_first_shard(file) {
                 return None;
             }
-            Some((file.clone(), *size))
+            Some((
+                file.clone(),
+                gguf_variant_size_bytes_from_siblings(file, siblings),
+            ))
         })
         .collect();
 
@@ -1119,6 +1172,59 @@ async fn remote_size_bytes(url: &str) -> Option<u64> {
         .ok()?
         .parse::<u64>()
         .ok()
+}
+
+#[derive(Debug, Deserialize)]
+struct HfTreeEntry {
+    #[serde(rename = "type")]
+    entry_type: String,
+    path: String,
+    size: Option<u64>,
+}
+
+async fn fetch_hf_tree_entries(
+    repo: &str,
+    revision: Option<&str>,
+    path: Option<&str>,
+) -> Option<Vec<HfTreeEntry>> {
+    let revision = revision.unwrap_or("main");
+    let base = format!("https://huggingface.co/api/models/{repo}/tree/{revision}");
+    let url = match path {
+        Some(path) if !path.is_empty() => format!("{base}/{path}?recursive=1&expand=1"),
+        _ => format!("{base}?recursive=1&expand=1"),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .user_agent(format!("mesh-llm/{}", crate::VERSION))
+        .build()
+        .ok()?;
+    client
+        .get(url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<Vec<HfTreeEntry>>()
+        .await
+        .ok()
+}
+
+fn sibling_entries_with_tree_sizes(
+    siblings: &[(String, Option<u64>)],
+    tree_entries: Vec<HfTreeEntry>,
+) -> Vec<(String, Option<u64>)> {
+    let tree_sizes = tree_entries
+        .into_iter()
+        .filter(|entry| entry.entry_type == "file")
+        .filter_map(|entry| Some((entry.path, entry.size?)))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    siblings
+        .iter()
+        .map(|(file, size)| (file.clone(), size.or_else(|| tree_sizes.get(file).copied())))
+        .collect()
 }
 
 async fn select_default_hf_file_fit_aware(
@@ -1249,12 +1355,21 @@ async fn fetch_repo_sibling_entries(
     let RepoInfo::Model(detail) = detail else {
         bail!("Expected model repo info for {repo}@{revision}");
     };
-    Ok(detail
+    let siblings = detail
         .siblings
         .unwrap_or_default()
         .iter()
         .map(|sibling| (sibling.rfilename.clone(), sibling.size))
-        .collect())
+        .collect::<Vec<_>>();
+
+    if siblings.iter().all(|(_, size)| size.is_some()) {
+        return Ok(siblings);
+    }
+
+    let tree_entries = fetch_hf_tree_entries(repo, Some(revision), None).await;
+    Ok(tree_entries
+        .map(|entries| sibling_entries_with_tree_sizes(&siblings, entries))
+        .unwrap_or(siblings))
 }
 
 async fn resolve_huggingface_file(
@@ -1365,6 +1480,23 @@ pub(super) async fn remote_hf_size_label_with_api(
     revision: Option<&str>,
     file: &str,
 ) -> Option<String> {
+    if split_gguf_shard_info(file).is_some() {
+        let tree_path = Path::new(file)
+            .parent()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty());
+        if let Some(tree_entries) = fetch_hf_tree_entries(repo, revision, tree_path).await {
+            let siblings = tree_entries
+                .into_iter()
+                .filter(|entry| entry.entry_type == "file")
+                .map(|entry| (entry.path, entry.size))
+                .collect::<Vec<_>>();
+            if let Some(size) = gguf_variant_size_bytes_from_siblings(file, &siblings) {
+                return Some(format_size_bytes(size));
+            }
+        }
+    }
+
     let url = huggingface_resolve_url(repo, revision, file);
     remote_size_label(&url).await
 }
