@@ -6,6 +6,7 @@ use super::formatters::{
 };
 use crate::models::{catalog, ModelDetails, SearchArtifactFilter, SearchHit, SearchSort};
 use anyhow::Result;
+use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use tabwriter::TabWriter;
 
@@ -37,24 +38,27 @@ impl SearchFormatter for ConsoleFormatter {
         limit: usize,
         sort: SearchSort,
     ) -> Result<()> {
-        println!(
+        let mut output = String::new();
+        writeln!(
+            &mut output,
             "📚 {} catalog matches for '{}' ({})",
             filter_label(filter),
             query,
             sort_label(sort)
-        );
+        )?;
         if let Some(summary) = super::formatters::local_capacity_summary() {
-            println!("{}", summary);
+            writeln!(&mut output, "{}", summary)?;
         }
-        println!();
+        writeln!(&mut output)?;
         for model in results.iter().take(limit) {
-            println!("• {}  {}", model.name, model.size);
-            println!("  {}", model.description);
+            writeln!(&mut output, "• {}  {}", model.name, model.size)?;
+            writeln!(&mut output, "  {}", model.description)?;
             if let Some(fit) = fit_hint_for_size_label(&model.size) {
-                println!("  {}", fit);
+                writeln!(&mut output, "  {}", fit)?;
             }
+            writeln!(&mut output)?;
         }
-        Ok(())
+        crate::cli::pager::print_or_page(&output)
     }
 
     fn render_hf_empty(
@@ -79,21 +83,23 @@ impl SearchFormatter for ConsoleFormatter {
         sort: SearchSort,
         results: &[SearchHit],
     ) -> Result<()> {
-        println!(
+        let mut output = String::new();
+        writeln!(
+            &mut output,
             "🔎 Hugging Face {} matches for '{}' ({})",
             filter_label(filter),
             query,
             sort_label(sort)
-        );
+        )?;
         if let Some(summary) = super::formatters::local_capacity_summary() {
-            println!("{}", summary);
+            writeln!(&mut output, "{}", summary)?;
         }
-        println!();
+        writeln!(&mut output)?;
         for (index, result) in results.iter().enumerate() {
-            println!("{}. 📦 {}", index + 1, result.repo_id);
-            println!("   type: {}", result.kind);
+            writeln!(&mut output, "{}. 📦 {}", index + 1, result.repo_id)?;
+            writeln!(&mut output, "   type: {}", result.kind)?;
             if let Some(variant_count) = result.variant_count {
-                println!("   🧬 variants: {} available", variant_count);
+                writeln!(&mut output, "   🧬 variants: {} available", variant_count)?;
             }
             let mut stats = Vec::new();
             if let Some(size) = &result.size_label {
@@ -106,7 +112,7 @@ impl SearchFormatter for ConsoleFormatter {
                 stats.push(format!("❤️ {}", format_count(likes)));
             }
             if !stats.is_empty() {
-                println!("   {}", stats.join("  "));
+                writeln!(&mut output, "   {}", stats.join("  "))?;
             }
             let mut caps = vec!["💬 text".to_string()];
             if result.capabilities.multimodal_label().is_some() {
@@ -124,52 +130,69 @@ impl SearchFormatter for ConsoleFormatter {
             if let Some(label) = result.capabilities.tool_use_label() {
                 caps.push(format!("🛠️ tool use ({label})"));
             }
-            println!("   capabilities: {}", caps.join("  "));
-            println!("   repo: {}", huggingface_repo_url(&result.repo_id));
-            println!("   ref: {}", result.exact_ref);
-            println!("   show: mesh-llm models show {}", result.exact_ref);
-            println!("   download: mesh-llm models download {}", result.exact_ref);
+            writeln!(&mut output, "   capabilities: {}", caps.join("  "))?;
+            writeln!(
+                &mut output,
+                "   repo: {}",
+                huggingface_repo_url(&result.repo_id)
+            )?;
+            writeln!(&mut output, "   ref: {}", result.exact_ref)?;
+            writeln!(
+                &mut output,
+                "   show: mesh-llm models show {}",
+                result.exact_ref
+            )?;
+            writeln!(
+                &mut output,
+                "   download: mesh-llm models download {}",
+                result.exact_ref
+            )?;
             if let Some(size) = &result.size_label {
                 if let Some(fit) = fit_hint_for_size_label(size) {
-                    println!("   {}", fit);
+                    writeln!(&mut output, "   {}", fit)?;
                 }
             }
             if let Some(model) = result.catalog {
-                println!("   ⭐ Recommended: {} ({})", model.name, model.size);
-                println!("   {}", model.description);
+                writeln!(
+                    &mut output,
+                    "   ⭐ Recommended: {} ({})",
+                    model.name, model.size
+                )?;
+                writeln!(&mut output, "   {}", model.description)?;
             }
-            println!();
+            writeln!(&mut output)?;
         }
-        Ok(())
+        crate::cli::pager::print_or_page(&output)
     }
 }
 
 impl ModelsFormatter for ConsoleFormatter {
     fn render_recommended(&self, models: &[&'static catalog::CatalogModel]) -> Result<()> {
-        println!("📚 Recommended models");
-        println!();
+        let mut output = String::new();
+        writeln!(&mut output, "📚 Recommended models")?;
+        writeln!(&mut output)?;
         for model in models {
             let model_capabilities = catalog_model_capabilities(model);
-            println!("• {}  {}", model.name, model.size);
-            println!("  {}", model.description);
+            writeln!(&mut output, "• {}  {}", model.name, model.size)?;
+            writeln!(&mut output, "  {}", model.description)?;
             if let Some(draft) = model.draft.as_deref() {
-                println!("  🧠 Draft: {}", draft);
+                writeln!(&mut output, "  🧠 Draft: {}", draft)?;
             }
             if let Some(label) = model_capabilities.vision_label() {
-                println!("  👁️ Vision: {}", label);
+                writeln!(&mut output, "  👁️ Vision: {}", label)?;
             }
             if let Some(label) = model_capabilities.audio_label() {
-                println!("  🔊 Audio: {}", label);
+                writeln!(&mut output, "  🔊 Audio: {}", label)?;
             }
             if let Some(label) = model_capabilities.reasoning_label() {
-                println!("  🧠 Reasoning: {}", label);
+                writeln!(&mut output, "  🧠 Reasoning: {}", label)?;
             }
             if model.moe.is_some() {
-                println!("  🧩 MoE: yes");
+                writeln!(&mut output, "  🧩 MoE: yes")?;
             }
-            println!();
+            writeln!(&mut output)?;
         }
-        Ok(())
+        crate::cli::pager::print_or_page(&output)
     }
 
     fn render_installed(&self, rows: &[InstalledRow]) -> Result<()> {
@@ -179,26 +202,32 @@ impl ModelsFormatter for ConsoleFormatter {
             return Ok(());
         }
 
-        println!("💾 Installed models");
-        println!("📁 HF cache: {}", huggingface_cache_dir().display());
-        println!();
+        let mut output = String::new();
+        writeln!(&mut output, "💾 Installed models")?;
+        writeln!(
+            &mut output,
+            "📁 HF cache: {}",
+            huggingface_cache_dir().display()
+        )?;
+        writeln!(&mut output)?;
         for row in rows {
-            println!("📦 {}", row.name);
-            println!("   type: {}", installed_model_kind(&row.path));
+            writeln!(&mut output, "📦 {}", row.name)?;
+            writeln!(&mut output, "   type: {}", installed_model_kind(&row.path))?;
             if let Some(bytes) = row.size {
-                println!("   size: {} 📏", format_installed_size(bytes));
+                writeln!(&mut output, "   size: {} 📏", format_installed_size(bytes))?;
             }
-            println!(
+            writeln!(
+                &mut output,
                 "   owner: {}",
                 if row.managed_by_mesh {
                     "mesh-managed"
                 } else {
                     "external"
                 }
-            );
+            )?;
             if let Some(last_used_at) = row.last_used_at.as_deref() {
                 if let Some(label) = format_relative_timestamp(last_used_at) {
-                    println!("   last used: {}", label);
+                    writeln!(&mut output, "   last used: {}", label)?;
                 }
             }
             let mut caps = vec!["💬 text".to_string()];
@@ -217,23 +246,31 @@ impl ModelsFormatter for ConsoleFormatter {
             if let Some(label) = row.capabilities.tool_use_label() {
                 caps.push(format!("🛠️ tool use ({label})"));
             }
-            println!("   capabilities: {}", caps.join("  "));
-            println!("   ref: {}", row.model_ref);
-            println!("   show: mesh-llm models show {}", row.model_ref);
-            println!("   download: mesh-llm models download {}", row.model_ref);
-            println!("   path: {}", row.path.display());
+            writeln!(&mut output, "   capabilities: {}", caps.join("  "))?;
+            writeln!(&mut output, "   ref: {}", row.model_ref)?;
+            writeln!(
+                &mut output,
+                "   show: mesh-llm models show {}",
+                row.model_ref
+            )?;
+            writeln!(
+                &mut output,
+                "   download: mesh-llm models download {}",
+                row.model_ref
+            )?;
+            writeln!(&mut output, "   path: {}", row.path.display())?;
             if let Some(model) = row.catalog_model {
-                println!("   about: {}", model.description);
+                writeln!(&mut output, "   about: {}", model.description)?;
                 if let Some(draft) = model.draft.as_deref() {
-                    println!("   🧠 draft: {}", draft);
+                    writeln!(&mut output, "   🧠 draft: {}", draft)?;
                 }
                 if model.moe.is_some() {
-                    println!("   🧩 MoE: yes");
+                    writeln!(&mut output, "   🧩 MoE: yes")?;
                 }
             }
-            println!();
+            writeln!(&mut output)?;
         }
-        Ok(())
+        crate::cli::pager::print_or_page(&output)
     }
 
     fn render_show(&self, details: &ModelDetails, variants: Option<&[ModelDetails]>) -> Result<()> {
