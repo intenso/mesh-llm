@@ -57,7 +57,6 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 FROM rust-deps AS rust-builder
 WORKDIR /src
-COPY . .
 RUN rm -rf mesh-llm/ui/dist
 COPY --from=ui-builder /app/dist mesh-llm/ui/dist
 # Restore real build scripts (cargo-chef stubs them during cook)
