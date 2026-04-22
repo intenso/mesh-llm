@@ -1,13 +1,5 @@
-import {
-  Brain,
-  Boxes,
-  Cpu,
-  ImagePlus,
-  Network,
-  Sparkles,
-  Volume2,
-} from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Brain, Boxes, Cpu, ImagePlus, Network, Sparkles, Volume2 } from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "./components/ui/badge";
 import {
@@ -61,6 +53,22 @@ import { cn } from "./lib/utils";
 import type { TopologyNode } from "./features/app-shell/lib/topology-types";
 import githubBlackLogo from "./assets/icons/github-invertocat-black.svg";
 import githubWhiteLogo from "./assets/icons/github-invertocat-white.svg";
+
+// Playground is dev-only. We conditionally create the lazy component based on import.meta.env.DEV
+// so Vite can completely exclude it from production builds (true tree-shaking).
+// In dev: creates lazy component for code-splitting + HMR
+// In prod: returns null immediately, zero bundle impact
+// CRITICAL: Must memoize at module scope to avoid creating new component type on every render
+const LazyPlaygroundPage = import.meta.env.DEV
+  ? lazy(() => import("./features/app-shell/playground/components/PlaygroundPage"))
+  : null;
+
+const DevOnlyPlayground = () => {
+  if (!LazyPlaygroundPage) {
+    return null; // Production: should never render
+  }
+  return <LazyPlaygroundPage />;
+};
 
 export {
   attachmentForMessage,
@@ -602,6 +610,9 @@ export function App() {
         : filteredCommandBarModels.length === 0
           ? "No models match the current filters."
           : "No models match this search.";
+  const showPlayground = import.meta.env.DEV && section === "playground";
+  const showDashboard =
+    section === "dashboard" || (!import.meta.env.DEV && section === "playground");
   const modelCommandBarFilterBar = (
     <ModelCommandBarFilterBar
       capabilityFilters={modelCapabilityFilters}
@@ -691,7 +702,7 @@ export function App() {
                 </div>
               ) : null}
 
-              {section === "dashboard" ? (
+              {showDashboard ? (
                 <div className="min-h-0 flex-1 overflow-y-auto">
                   <div className="mx-auto w-full max-w-7xl p-4">
                     <DashboardPage
@@ -708,6 +719,18 @@ export function App() {
                     />
                   </div>
                 </div>
+              ) : null}
+
+              {showPlayground ? (
+                <Suspense
+                  fallback={
+                    <div className="flex min-h-0 items-center justify-center p-8 text-muted-foreground">
+                      Loading playground...
+                    </div>
+                  }
+                >
+                  <DevOnlyPlayground />
+                </Suspense>
               ) : null}
             </main>
             <footer
