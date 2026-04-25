@@ -11,7 +11,6 @@ concurrency:
 
 permissions:
   contents: write
-  pull-requests: write
 
 env:
   CACHE_NAMESPACE: mesh-llm
@@ -175,12 +174,10 @@ jobs:
       cache_key_prefix: llama-canary-
       workflow_cache_file: .github/workflows/llama-upstream-canary.yml
 
-  update_pin_pr:
+  update_main_pin:
     needs: [latest_upstream, linux_build, inference_smoke_tests]
     if: needs.latest_upstream.outputs.changed == 'true' && needs.linux_build.result == 'success' && needs.inference_smoke_tests.result == 'success'
     runs-on: ubuntu-latest
-    env:
-      NEW_SHA: ${{ needs.latest_upstream.outputs.new_sha }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -189,66 +186,49 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v2
 
+      - name: Check out latest main
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+
       - name: Prepare validated llama upstream
         run: scripts/prepare-llama.sh "${{ needs.latest_upstream.outputs.new_sha }}"
 
       - name: Update llama upstream pin
         run: just llama-update-pin
 
-      - name: Generate PR body
+      - name: Generate update summary
         run: |
           just llama-summary \
             "${{ needs.latest_upstream.outputs.old_sha }}" \
             "${{ needs.latest_upstream.outputs.new_sha }}" \
-            > /tmp/llama-upstream-pr.md
+            > /tmp/llama-upstream-summary.md
 
-      - name: Push upstream pin branch
-        id: branch
+      - name: Commit and push pin update to main
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          short_sha="${NEW_SHA:0:12}"
-          BRANCH="automation/update-llama-upstream-${short_sha}-${GITHUB_RUN_ID}"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-
-          git checkout -B "$BRANCH"
           git add third_party/llama.cpp/upstream.txt LLAMA_CPP_SHA
           if git diff --cached --quiet; then
             echo "No upstream pin changes to commit."
+            {
+              echo "## llama.cpp upstream pin update"
+              echo
+              echo "No pin changes were present after validation."
+              echo
+              cat /tmp/llama-upstream-summary.md
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
           git commit -m "Update llama.cpp upstream pin"
-          git push origin "$BRANCH:$BRANCH"
-
-      - name: Open upstream pin PR
-        env:
-          BRANCH: ${{ steps.branch.outputs.branch }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          title="Update llama.cpp upstream pin"
-          pr_url="$(gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "$title" \
-            --body-file /tmp/llama-upstream-pr.md 2>/tmp/llama-pr-create.err || true)"
+          git push origin HEAD:main
 
           {
             echo "## llama.cpp upstream pin update"
             echo
-            if [[ -n "$pr_url" ]]; then
-              echo "PR: $pr_url"
-            else
-              echo "Pushed \`$BRANCH\`, but could not create a PR automatically."
-              echo
-              echo "Open the PR from:"
-              echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...$BRANCH?expand=1"
-              echo
-              echo "GitHub CLI output:"
-              echo
-              sed 's/^/> /' /tmp/llama-pr-create.err
-            fi
+            echo "Updated \`main\` directly with commit \`$(git rev-parse --short HEAD)\`."
             echo
-            cat /tmp/llama-upstream-pr.md
+            cat /tmp/llama-upstream-summary.md
           } >> "$GITHUB_STEP_SUMMARY"
