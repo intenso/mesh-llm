@@ -179,6 +179,8 @@ jobs:
     needs: [latest_upstream, linux_build, inference_smoke_tests]
     if: needs.latest_upstream.outputs.changed == 'true' && needs.linux_build.result == 'success' && needs.inference_smoke_tests.result == 'success'
     runs-on: ubuntu-latest
+    env:
+      NEW_SHA: ${{ needs.latest_upstream.outputs.new_sha }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -201,11 +203,14 @@ jobs:
             > /tmp/llama-upstream-pr.md
 
       - name: Push upstream pin branch
-        env:
-          BRANCH: automation/update-llama-upstream
+        id: branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          short_sha="${NEW_SHA:0:12}"
+          BRANCH="automation/update-llama-upstream-${short_sha}-${GITHUB_RUN_ID}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
           git checkout -B "$BRANCH"
           git add third_party/llama.cpp/upstream.txt LLAMA_CPP_SHA
@@ -215,30 +220,19 @@ jobs:
           fi
 
           git commit -m "Update llama.cpp upstream pin"
+          git push origin "$BRANCH:$BRANCH"
 
-          remote_sha="$(git ls-remote --heads origin "$BRANCH" | awk '{print $1}')"
-          if [[ -n "$remote_sha" ]]; then
-            git push --force-with-lease="refs/heads/$BRANCH:$remote_sha" origin "$BRANCH:$BRANCH"
-          else
-            git push origin "$BRANCH:$BRANCH"
-          fi
-
-      - name: Open or update upstream pin PR
+      - name: Open upstream pin PR
         env:
-          BRANCH: automation/update-llama-upstream
+          BRANCH: ${{ steps.branch.outputs.branch }}
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Update llama.cpp upstream pin"
-          pr_url="$(gh pr view "$BRANCH" --json url --jq .url 2>/dev/null || true)"
-          if [[ -n "$pr_url" ]]; then
-            gh pr edit "$BRANCH" --title "$title" --body-file /tmp/llama-upstream-pr.md
-          else
-            pr_url="$(gh pr create \
-              --base main \
-              --head "$BRANCH" \
-              --title "$title" \
-              --body-file /tmp/llama-upstream-pr.md 2>/tmp/llama-pr-create.err || true)"
-          fi
+          pr_url="$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "$title" \
+            --body-file /tmp/llama-upstream-pr.md 2>/tmp/llama-pr-create.err || true)"
 
           {
             echo "## llama.cpp upstream pin update"
