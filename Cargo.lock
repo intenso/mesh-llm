@@ -3472,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-api"
-version = "0.65.0-rc2"
+version = "0.65.0"
 dependencies = [
  "hex",
  "mesh-llm-client",
@@ -3497,7 +3497,7 @@ version = "0.1.0"
 
 [[package]]
 name = "mesh-llm"
-version = "0.65.0-rc2"
+version = "0.65.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -3555,7 +3555,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-client"
-version = "0.65.0-rc2"
+version = "0.65.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3580,7 +3580,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-plugin"
-version = "0.65.0-rc2"
+version = "0.65.0"
 dependencies = [
  "anyhow",
  "async-trait",
